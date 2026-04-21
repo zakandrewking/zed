@@ -273,7 +273,7 @@ impl RepoName<'_> {
 pub fn read_example_files(inputs: &[PathBuf]) -> Vec<Example> {
     let mut examples = Vec::new();
 
-    for path in inputs {
+    for path in expand_example_inputs(inputs) {
         let is_stdin = path.as_path() == Path::new("-");
         let content = if is_stdin {
             let mut buffer = String::new();
@@ -282,7 +282,7 @@ pub fn read_example_files(inputs: &[PathBuf]) -> Vec<Example> {
                 .expect("Failed to read from stdin");
             buffer
         } else {
-            std::fs::read_to_string(path)
+            std::fs::read_to_string(&path)
                 .unwrap_or_else(|_| panic!("Failed to read path: {:?}", &path))
         };
         let filename = path.file_stem().unwrap().to_string_lossy().to_string();
@@ -341,6 +341,64 @@ pub fn read_example_files(inputs: &[PathBuf]) -> Vec<Example> {
     examples
 }
 
+fn expand_example_inputs(inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut expanded_paths = Vec::new();
+    for input in inputs {
+        if input.as_path() == Path::new("-") {
+            expanded_paths.push(input.clone());
+            continue;
+        }
+
+        let metadata = std::fs::metadata(input)
+            .unwrap_or_else(|_| panic!("Failed to read metadata for path: {:?}", &input));
+        if metadata.is_dir() {
+            collect_example_paths(input, &mut expanded_paths);
+        } else {
+            expanded_paths.push(input.clone());
+        }
+    }
+    expanded_paths
+}
+
+fn collect_example_paths(directory: &Path, expanded_paths: &mut Vec<PathBuf>) {
+    let mut entries = std::fs::read_dir(directory)
+        .unwrap_or_else(|_| panic!("Failed to read example directory: {:?}", directory))
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for path in entries {
+        let metadata = std::fs::metadata(&path)
+            .unwrap_or_else(|_| panic!("Failed to read metadata for path: {:?}", &path));
+        if metadata.is_dir() {
+            collect_example_paths(&path, expanded_paths);
+        } else if is_example_file(&path) {
+            expanded_paths.push(path);
+        }
+    }
+}
+
+fn is_example_file(path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    match filename {
+        "manifest.json"
+        | "request.json"
+        | "response.json"
+        | "request_headers.txt"
+        | "response_headers.txt"
+        | "response_status.txt"
+        | "prompt.txt" => false,
+        _ => matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("md" | "json" | "jsonl")
+        ),
+    }
+}
+
 pub fn sort_examples_by_repo_and_rev(examples: &mut [Example]) {
     examples.sort_by(|a, b| {
         a.spec
@@ -382,4 +440,52 @@ fn parse_markdown_example(input: &str) -> Result<Example> {
         state: None,
         zed_version: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn reads_example_markdown_recursively_from_directories() {
+        let directory = tempdir().unwrap();
+        let fixture_dir = directory.path().join("request-0001");
+        std::fs::create_dir_all(&fixture_dir).unwrap();
+
+        let markdown = r#"+++
+repository_url = "git@github.com:zed-industries/zed.git"
+revision = "deadbeef"
++++
+
+# Captured Example
+
+## Edit History
+
+(No edit history)
+
+## Cursor Position
+
+```src/main.rs
+fn main() {
+<[CURSOR_POSITION]
+}
+```
+
+## Expected Patch
+
+"#;
+
+        std::fs::write(fixture_dir.join("spec.md"), markdown).unwrap();
+        std::fs::write(fixture_dir.join("manifest.json"), "{}").unwrap();
+        std::fs::write(fixture_dir.join("request.json"), "{}").unwrap();
+
+        let examples = read_example_files(&[directory.path().to_path_buf()]);
+        assert_eq!(examples.len(), 1);
+        assert_eq!(examples[0].spec.name, "Captured Example");
+        assert_eq!(
+            examples[0].spec.cursor_path.as_ref(),
+            Path::new("src/main.rs")
+        );
+    }
 }
