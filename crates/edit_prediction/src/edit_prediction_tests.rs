@@ -16,7 +16,7 @@ use futures::{
 use gpui::App;
 use gpui::{
     Entity, TestAppContext,
-    http_client::{FakeHttpClient, Response},
+    http_client::{FakeHttpClient, Method, Response},
 };
 use indoc::indoc;
 use language::{
@@ -28,9 +28,16 @@ use lsp::LanguageServerId;
 use parking_lot::Mutex;
 use pretty_assertions::{assert_eq, assert_matches};
 use project::{FakeFs, Project};
+use release_channel::AppVersion;
 use serde_json::json;
+use std::env;
 use settings::SettingsStore;
-use std::{ops::Range, path::Path, sync::Arc, time::Duration};
+use std::{
+    ops::Range,
+    path::Path,
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 use util::{
     path,
     test::{TextRangeMarker, marked_text_ranges_by},
@@ -43,6 +50,32 @@ use crate::{
     BufferEditPrediction, EDIT_PREDICTION_SETTLED_QUIESCENCE, EditPredictionId,
     EditPredictionJumpsFeatureFlag, EditPredictionStore, REJECT_REQUEST_DEBOUNCE,
 };
+
+static ENVIRONMENT_MUTEX: LazyLock<std::sync::Mutex<()>> =
+    LazyLock::new(|| std::sync::Mutex::new(()));
+
+struct ScopedEnvironmentVariable {
+    key: &'static str,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+impl ScopedEnvironmentVariable {
+    fn set(key: &'static str, value: &str) -> Self {
+        let guard = ENVIRONMENT_MUTEX.lock().unwrap();
+        unsafe {
+            env::set_var(key, value);
+        }
+        Self { key, _guard: guard }
+    }
+}
+
+impl Drop for ScopedEnvironmentVariable {
+    fn drop(&mut self) {
+        unsafe {
+            env::remove_var(self.key);
+        }
+    }
+}
 
 #[gpui::test]
 async fn test_current_state(cx: &mut TestAppContext) {
@@ -178,6 +211,100 @@ async fn test_current_state(cx: &mut TestAppContext) {
             .unwrap();
         assert_matches!(prediction, BufferEditPrediction::Local { .. });
     });
+}
+
+#[gpui::test]
+async fn test_send_v3_request_uses_custom_predict_edits_url(cx: &mut TestAppContext) {
+    let _custom_url = ScopedEnvironmentVariable::set(
+        ZED_PREDICT_EDITS_URL_ENV_VAR,
+        "http://localhost/custom/predict_edits/v3",
+    );
+
+    let http_client = FakeHttpClient::create(move |req| {
+        let method = req.method().clone();
+        let uri = req.uri().path().to_string();
+        let mut body = req.into_body();
+
+        async move {
+            match (method, uri.as_str()) {
+                (Method::POST, "/custom/predict_edits/v3") => {
+                    let mut buf = Vec::new();
+                    body.read_to_end(&mut buf).await.ok();
+                    let decompressed = zstd::decode_all(&buf[..]).unwrap();
+                    let req: PredictEditsV3Request =
+                        serde_json::from_slice(&decompressed).unwrap();
+
+                    Ok(Response::builder()
+                        .status(200)
+                        .body(
+                            serde_json::to_string(&PredictEditsV3Response {
+                                request_id: "custom-request-id".to_string(),
+                                editable_range: 0..req.input.cursor_excerpt.len(),
+                                output: String::new(),
+                                model_version: None,
+                            })
+                            .unwrap()
+                            .into(),
+                        )
+                        .unwrap())
+                }
+                (Method::POST, "/client/llm_tokens") => Ok(Response::builder()
+                    .status(200)
+                    .body(
+                        serde_json::to_string(&CreateLlmTokenResponse {
+                            token: LlmToken("the-llm-token".to_string()),
+                        })
+                        .unwrap()
+                        .into(),
+                    )
+                    .unwrap()),
+                _ => panic!("Unexpected path: {}", uri),
+            }
+        }
+    });
+
+    let client = cx.update(|cx| {
+        client::Client::new(Arc::new(FakeSystemClock::new()), http_client, cx)
+    });
+    let user_store = cx.update(|cx| cx.new(|cx| client::UserStore::new(client.clone(), cx)));
+    cx.update(|cx| {
+        RefreshLlmTokenListener::register(client.clone(), user_store, cx);
+    });
+
+    let llm_token = cx.update(|cx| client::global_llm_token(cx));
+    let app_version = cx.update(|cx| AppVersion::global(cx));
+    let request = PredictEditsV3Request {
+        input: ZetaPromptInput {
+            cursor_path: Arc::from(Path::new("src/main.rs")),
+            cursor_excerpt: "fn main() {}\n".into(),
+            cursor_offset_in_excerpt: 3,
+            excerpt_start_row: Some(0),
+            events: Vec::new(),
+            related_files: Some(Vec::new()),
+            active_buffer_diagnostics: Vec::new(),
+            excerpt_ranges: Default::default(),
+            syntax_ranges: None,
+            in_open_source_repo: false,
+            can_collect_data: false,
+            repo_url: None,
+        },
+        trigger: Default::default(),
+    };
+
+    let (response, _) = EditPredictionStore::send_v3_request(
+        request.input,
+        None,
+        client,
+        llm_token,
+        None,
+        app_version,
+        request.trigger,
+        PredictEditsMode::Subtle,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(response.request_id, "custom-request-id");
 }
 
 #[gpui::test]

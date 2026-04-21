@@ -111,6 +111,7 @@ const EDIT_HISTORY_DIFF_SIZE_LIMIT: usize = 2048 * 3; // ~2048 tokens or ~50% of
 const COLLABORATOR_EDIT_LOCALITY_CONTEXT_TOKENS: usize = 512;
 const LAST_CHANGE_GROUPING_TIME: Duration = Duration::from_secs(1);
 const ZED_PREDICT_DATA_COLLECTION_CHOICE: &str = "zed_predict_data_collection_choice";
+const ZED_PREDICT_EDITS_URL_ENV_VAR: &str = "ZED_PREDICT_EDITS_URL";
 const REJECT_REQUEST_DEBOUNCE: Duration = Duration::from_secs(15);
 const EDIT_PREDICTION_SETTLED_EVENT: &str = "Edit Prediction Settled";
 const EDIT_PREDICTION_SETTLED_TTL: Duration = Duration::from_secs(60 * 5);
@@ -2598,9 +2599,18 @@ impl EditPredictionStore {
         trigger: PredictEditsRequestTrigger,
         mode: PredictEditsMode,
     ) -> Result<(PredictEditsV3Response, Option<EditPredictionUsage>)> {
-        let url = client
-            .http_client()
-            .build_zed_llm_url("/predict_edits/v3", &[])?;
+        let custom_url = env::var(ZED_PREDICT_EDITS_URL_ENV_VAR)
+            .ok()
+            .map(|url| Url::parse(&url))
+            .transpose()?
+            .map(Arc::new);
+        let url = if let Some(custom_url) = &custom_url {
+            custom_url.as_ref().clone()
+        } else {
+            client
+                .http_client()
+                .build_zed_llm_url("/predict_edits/v3", &[])?
+        };
 
         let request = PredictEditsV3Request { input, trigger };
 
@@ -2625,7 +2635,7 @@ impl EditPredictionStore {
             llm_token,
             organization_id,
             app_version,
-            true,
+            custom_url.is_none(),
         )
         .await
     }
