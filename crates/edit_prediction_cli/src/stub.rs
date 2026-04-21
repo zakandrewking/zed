@@ -31,6 +31,9 @@ pub struct ServeStubArgs {
     /// Forward the raw request to this upstream native predict-edits endpoint.
     #[arg(long)]
     pub passthrough_url: Option<String>,
+    /// Inject this bearer token upstream when the incoming request has no Authorization header.
+    #[arg(long)]
+    pub upstream_bearer_token: Option<String>,
     /// Print the formatted default Zeta prompt for each request.
     #[arg(long)]
     pub print_prompt: bool,
@@ -164,6 +167,7 @@ pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
                 passthrough_url,
                 &request_headers,
                 &raw_request_body,
+                args.upstream_bearer_token.as_deref(),
             )?
         } else {
             build_local_response_payload(args, request_count, parsed_request.as_ref())?
@@ -270,11 +274,13 @@ fn forward_request(
     passthrough_url: &str,
     request_headers: &[(String, String)],
     raw_request_body: &[u8],
+    upstream_bearer_token: Option<&str>,
 ) -> Result<ResponsePayload> {
     smol::block_on(async {
         let mut request = http_client::Request::builder()
             .method(HttpMethod::POST)
             .uri(passthrough_url);
+        let mut has_authorization_header = false;
 
         for (name, value) in request_headers {
             if header_is_hop_by_hop(name)
@@ -284,7 +290,15 @@ fn forward_request(
                 continue;
             }
 
+            if name.eq_ignore_ascii_case("authorization") {
+                has_authorization_header = true;
+            }
+
             request = request.header(name, value);
+        }
+
+        if !has_authorization_header && let Some(upstream_bearer_token) = upstream_bearer_token {
+            request = request.header("Authorization", format!("Bearer {upstream_bearer_token}"));
         }
 
         let request = request

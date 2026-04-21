@@ -8,6 +8,7 @@ repo_root="$(cd -- "$script_dir/.." && pwd)"
 bind="127.0.0.1:3000"
 artifact_dir=""
 passthrough_url="${ZED_PREDICT_CAPTURE_PASSTHROUGH_URL:-https://cloud.zed.dev/predict_edits/v3}"
+upstream_bearer_token="${ZED_PREDICT_CAPTURE_BEARER_TOKEN:-}"
 user_data_dir=""
 build_binaries=1
 stub_only=0
@@ -30,6 +31,8 @@ Options:
                              Default: /tmp/zed-predict-captures-<timestamp>
   --passthrough-url <url>    Upstream native predict-edits URL.
                              Default: https://cloud.zed.dev/predict_edits/v3
+  --bearer-token <token>     Bearer token to inject upstream when the local request
+                             has no Authorization header.
   --user-data-dir <dir>      Pass a custom Zed user data dir.
   --zed-binary <path>        Override the Zed binary path.
   --ep-binary <path>         Override the ep CLI binary path.
@@ -40,6 +43,7 @@ Options:
 
 Examples:
   script/capture-predict-edits
+  ZED_PREDICT_CAPTURE_BEARER_TOKEN=... script/capture-predict-edits
   script/capture-predict-edits -- --foreground
   script/capture-predict-edits --artifact-dir /tmp/zed-captures -- my/project
 EOF
@@ -60,6 +64,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --passthrough-url)
       passthrough_url="$2"
+      shift 2
+      ;;
+    --bearer-token)
+      upstream_bearer_token="$2"
       shift 2
       ;;
     --user-data-dir)
@@ -159,11 +167,22 @@ trap cleanup EXIT INT TERM
 echo "Artifact dir: $artifact_dir"
 echo "Passthrough URL: $passthrough_url"
 echo "Stub URL: $stub_url"
+if [[ -n "$upstream_bearer_token" ]]; then
+  echo "Upstream bearer token: configured"
+fi
 
-"$ep_binary" serve-stub \
-  --bind "$bind" \
-  --passthrough-url "$passthrough_url" \
-  --artifact-dir "$artifact_dir" &
+stub_command=(
+  "$ep_binary" serve-stub
+  --bind "$bind"
+  --passthrough-url "$passthrough_url"
+  --artifact-dir "$artifact_dir"
+)
+
+if [[ -n "$upstream_bearer_token" ]]; then
+  stub_command+=(--upstream-bearer-token "$upstream_bearer_token")
+fi
+
+"${stub_command[@]}" &
 stub_pid=$!
 
 sleep 1
