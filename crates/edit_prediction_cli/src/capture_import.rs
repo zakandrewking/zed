@@ -110,7 +110,7 @@ pub fn run_import_captures(args: &ImportCapturesArgs, output_path: Option<&PathB
             &source_name,
         )?;
         let markdown = spec.to_markdown();
-        ExampleSpec::from_markdown(&markdown)
+        validate_round_trip(&spec, &markdown)
             .context("generated markdown fixture did not round-trip")?;
         fs::write(fixture_dir.join("spec.md"), markdown)
             .with_context(|| format!("failed to write spec.md in {}", fixture_dir.display()))?;
@@ -166,6 +166,31 @@ pub fn run_import_captures(args: &ImportCapturesArgs, output_path: Option<&PathB
         output_dir.display()
     );
 
+    Ok(())
+}
+
+fn validate_round_trip(spec: &ExampleSpec, markdown: &str) -> Result<()> {
+    let parsed = ExampleSpec::from_markdown(markdown)?;
+    if parsed.name != spec.name {
+        bail!(
+            "round-trip name mismatch: expected {:?}, got {:?}",
+            spec.name,
+            parsed.name
+        );
+    }
+    if parsed.cursor_path != spec.cursor_path {
+        bail!(
+            "round-trip cursor_path mismatch: expected {:?}, got {:?}",
+            spec.cursor_path,
+            parsed.cursor_path
+        );
+    }
+    if parsed.cursor_position != spec.cursor_position {
+        bail!("round-trip cursor_position mismatch");
+    }
+    if parsed.edit_history != spec.edit_history {
+        bail!("round-trip edit_history mismatch");
+    }
     Ok(())
 }
 

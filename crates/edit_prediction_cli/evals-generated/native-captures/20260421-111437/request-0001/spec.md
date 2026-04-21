@@ -1,6 +1,6 @@
 +++
 repository_url = "git@github.com:zed-industries/zed.git"
-revision = "0daaaca7564d83db8d9a4809ba1dfd9517171630"
+revision = "3f5d2318c6d81751e033b662128af0ae2e5f2d2f"
 tags = [
     "native-capture",
     "trigger-other",
@@ -34,7 +34,7 @@ This fixture preserves the captured request semantics and raw artifacts. It does
 
 ## Cursor Position
 
-```zed/CLAUDE.md
+~~~zed/CLAUDE.md
 # Hello World
 
 Dear Mom, i am running Zed in my house.
@@ -231,7 +231,7 @@ Rules emerge from validated patterns, not one-off observations. The workflow is:
 1. Agent notes a pattern during a session.
 2. Team validates the pattern in code review.
 3. A dedicated commit adds the rule with context on *why* it exists.
-```
+~~~
 
 ## Expected Patch
 

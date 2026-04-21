@@ -70,6 +70,34 @@ struct FrontMatter<'a> {
     tags: Vec<String>,
 }
 
+fn longest_run(input: &str, character: char) -> usize {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for next in input.chars() {
+        if next == character {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    longest
+}
+
+fn write_fenced_code_block(markdown: &mut String, info: &str, body: &str) {
+    use std::fmt::Write as _;
+
+    let fence_length = longest_run(body, '~').max(longest_run(info, '~')).max(2) + 1;
+    let fence = "~".repeat(fence_length);
+
+    _ = writeln!(markdown, "{fence}{info}");
+    markdown.push_str(body);
+    if !markdown.ends_with('\n') {
+        markdown.push('\n');
+    }
+    _ = writeln!(markdown, "{fence}");
+}
+
 impl ExampleSpec {
     /// Generate a sanitized filename for this example.
     pub fn filename(&self) -> String {
@@ -121,12 +149,7 @@ impl ExampleSpec {
         if !self.uncommitted_diff.is_empty() {
             _ = writeln!(markdown, "## {}", UNCOMMITTED_DIFF_HEADING);
             _ = writeln!(markdown);
-            _ = writeln!(markdown, "```diff");
-            markdown.push_str(&self.uncommitted_diff);
-            if !markdown.ends_with('\n') {
-                markdown.push('\n');
-            }
-            _ = writeln!(markdown, "```");
+            write_fenced_code_block(&mut markdown, "diff", &self.uncommitted_diff);
             markdown.push('\n');
         }
 
@@ -137,46 +160,30 @@ impl ExampleSpec {
             _ = writeln!(markdown, "(No edit history)");
             _ = writeln!(markdown);
         } else {
-            _ = writeln!(markdown, "```diff");
-            markdown.push_str(&self.edit_history);
-            if !markdown.ends_with('\n') {
-                markdown.push('\n');
-            }
-            _ = writeln!(markdown, "```");
+            write_fenced_code_block(&mut markdown, "diff", &self.edit_history);
             markdown.push('\n');
         }
 
         _ = writeln!(markdown, "## {}", CURSOR_POSITION_HEADING);
         _ = writeln!(markdown);
-        _ = writeln!(markdown, "```{}", self.cursor_path.to_string_lossy());
-        markdown.push_str(&self.cursor_position);
-        if !markdown.ends_with('\n') {
-            markdown.push('\n');
-        }
-        _ = writeln!(markdown, "```");
+        write_fenced_code_block(
+            &mut markdown,
+            &self.cursor_path.to_string_lossy(),
+            &self.cursor_position,
+        );
         markdown.push('\n');
 
         _ = writeln!(markdown, "## {}", EXPECTED_PATCH_HEADING);
         markdown.push('\n');
         for patch in &self.expected_patches {
-            _ = writeln!(markdown, "```diff");
-            markdown.push_str(patch);
-            if !markdown.ends_with('\n') {
-                markdown.push('\n');
-            }
-            _ = writeln!(markdown, "```");
+            write_fenced_code_block(&mut markdown, "diff", patch);
             markdown.push('\n');
         }
 
         if let Some(rejected_patch) = &self.rejected_patch {
             _ = writeln!(markdown, "## {}", REJECTED_PATCH_HEADING);
             markdown.push('\n');
-            _ = writeln!(markdown, "```diff");
-            markdown.push_str(rejected_patch);
-            if !markdown.ends_with('\n') {
-                markdown.push('\n');
-            }
-            _ = writeln!(markdown, "```");
+            write_fenced_code_block(&mut markdown, "diff", rejected_patch);
             markdown.push('\n');
         }
 
@@ -851,5 +858,41 @@ mod tests {
         // Verify all three diffs are present
         let diff_count = spec.edit_history.matches("--- a/src/main.rs").count();
         assert_eq!(diff_count, 3);
+    }
+
+    #[test]
+    fn test_markdown_round_trip_with_embedded_fences_in_cursor_position() {
+        let mut spec = ExampleSpec {
+            name: "Captured Example".to_string(),
+            repository_url: "git@github.com:zed-industries/zed.git".to_string(),
+            revision: "deadbeef".to_string(),
+            tags: vec!["native-capture".to_string()],
+            reasoning: Some("Fixture with embedded code fences".to_string()),
+            uncommitted_diff: String::new(),
+            cursor_path: Path::new("docs/example.md").into(),
+            cursor_position: String::new(),
+            edit_history: String::new(),
+            expected_patches: Vec::new(),
+            rejected_patch: None,
+            telemetry: None,
+            human_feedback: Vec::new(),
+            rating: None,
+        };
+
+        let excerpt = indoc! {r#"
+            # Heading
+
+            ```rust
+            fn main() {}
+            ```
+        "#};
+        let cursor_offset = excerpt.find("fn main").unwrap();
+        spec.set_cursor_excerpt(excerpt, cursor_offset, "");
+
+        let markdown = spec.to_markdown();
+        let parsed = ExampleSpec::from_markdown(&markdown).unwrap();
+        assert_eq!(parsed.name, spec.name);
+        assert_eq!(parsed.cursor_path, spec.cursor_path);
+        assert_eq!(parsed.cursor_position, spec.cursor_position);
     }
 }

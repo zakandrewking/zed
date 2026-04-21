@@ -1,9 +1,9 @@
 {
-  "imported_at": "2026-04-21T18:29:27.797669+00:00",
+  "imported_at": "2026-04-21T18:35:00.869662+00:00",
   "source_directory": "/tmp/zed-predict-captures-20260421-111437/request-0005",
   "request_name": "request-0005",
   "repository_url": "git@github.com:zed-industries/zed.git",
-  "revision": "0daaaca7564d83db8d9a4809ba1dfd9517171630",
+  "revision": "3f5d2318c6d81751e033b662128af0ae2e5f2d2f",
   "trigger": "Other",
   "mode": "eager",
   "response_status": 200,
