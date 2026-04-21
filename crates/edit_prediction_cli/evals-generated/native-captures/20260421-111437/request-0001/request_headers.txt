@@ -1,0 +1,8 @@
+content-type: application/json
+x-zed-version: 0.234.0+dev.b4d3b2e8807f7e9a79aa79349082da36819dbdca
+content-encoding: zstd
+x-zed-predict-edits-mode: eager
+accept: */*
+user-agent: Zed/0.234.0+dev.b4d3b2e8807f7e9a79aa79349082da36819dbdca (macos; aarch64)
+host: 127.0.0.1:3030
+content-length: 5467

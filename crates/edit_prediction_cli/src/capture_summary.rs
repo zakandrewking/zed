@@ -17,30 +17,7 @@ pub fn run_summarize_captures(
     args: &SummarizeCapturesArgs,
     output_path: Option<&PathBuf>,
 ) -> Result<()> {
-    let capture_directories = fs::read_dir(&args.directory)
-        .with_context(|| {
-            format!(
-                "failed to read capture directory {}",
-                args.directory.display()
-            )
-        })?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_type()
-                .ok()
-                .is_some_and(|file_type| file_type.is_dir())
-        })
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("request-"))
-        })
-        .collect::<Vec<_>>();
-
-    let mut capture_directories = capture_directories;
-    capture_directories.sort();
+    let capture_directories = capture_request_directories(&args.directory)?;
 
     let mut output = String::new();
     output.push_str("# Predict Edits Capture Summary\n\n");
@@ -63,23 +40,46 @@ pub fn run_summarize_captures(
 }
 
 #[derive(Debug)]
-struct CaptureSummary {
-    name: String,
-    request_headers: Vec<(String, String)>,
-    response_headers: Vec<(String, String)>,
-    response_status: Option<u16>,
-    parsed_request: Option<PredictEditsV3Request>,
-    parsed_response: Option<PredictEditsV3Response>,
-    raw_request_bytes: Option<usize>,
-    raw_response_bytes: Option<usize>,
-    has_prompt: bool,
+pub(crate) struct CaptureSummary {
+    pub(crate) name: String,
+    pub(crate) request_headers: Vec<(String, String)>,
+    pub(crate) response_headers: Vec<(String, String)>,
+    pub(crate) response_status: Option<u16>,
+    pub(crate) parsed_request: Option<PredictEditsV3Request>,
+    pub(crate) parsed_response: Option<PredictEditsV3Response>,
+    pub(crate) raw_request_bytes: Option<usize>,
+    pub(crate) raw_response_bytes: Option<usize>,
+    pub(crate) has_prompt: bool,
 }
 
-fn load_capture_summary(capture_directory: &Path) -> Result<CaptureSummary> {
+pub(crate) fn capture_request_directories(directory: &Path) -> Result<Vec<PathBuf>> {
+    let capture_directories = fs::read_dir(directory)
+        .with_context(|| format!("failed to read capture directory {}", directory.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .is_some_and(|file_type| file_type.is_dir())
+        })
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("request-"))
+        })
+        .collect::<Vec<_>>();
+
+    let mut capture_directories = capture_directories;
+    capture_directories.sort();
+    Ok(capture_directories)
+}
+
+pub(crate) fn load_capture_summary(capture_directory: &Path) -> Result<CaptureSummary> {
     let request_headers = read_headers(&capture_directory.join("request_headers.txt"))?;
     let response_headers = read_headers(&capture_directory.join("response_headers.txt"))?;
     let response_status = read_optional_text(&capture_directory.join("response_status.txt"))?
-        .map(|value| value.parse::<u16>())
+        .map(|value| value.trim().parse::<u16>())
         .transpose()
         .context("failed to parse response status")?;
     let parsed_request = load_request(capture_directory)?;
@@ -142,7 +142,7 @@ fn load_response(capture_directory: &Path) -> Result<Option<PredictEditsV3Respon
     }
 }
 
-fn read_headers(path: &Path) -> Result<Vec<(String, String)>> {
+pub(crate) fn read_headers(path: &Path) -> Result<Vec<(String, String)>> {
     let Some(contents) = read_optional_text(path)? else {
         return Ok(Vec::new());
     };
@@ -158,7 +158,7 @@ fn read_headers(path: &Path) -> Result<Vec<(String, String)>> {
     Ok(headers)
 }
 
-fn read_optional_text(path: &Path) -> Result<Option<String>> {
+pub(crate) fn read_optional_text(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -168,7 +168,7 @@ fn read_optional_text(path: &Path) -> Result<Option<String>> {
     })?))
 }
 
-fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
     if !path.exists() {
         return Ok(None);
     }

@@ -1,0 +1,9 @@
+{
+  "request_id": "stub-request-2",
+  "output": "# Hello World\n\nDear Mom, i am running Zed in my house.\n\n\n# Rust coding guidelines\n\n* Prioritize code correctness and clarity. Speed and efficiency are secondary priorities unless otherwise specified.\n* Do not write organizational or comments that summarize the code. Comments should only be written in order to explain \"why\" the code is written in some way in the case there is a reason that is tricky / non-obvious.\n* Prefer implementing functionality in existing files unless it is a new logical component. Avoid creating many small files.\n* Avoid using functions that panic like `unwrap()`, instead use mechanisms like `?` to propagate errors.\n* Be careful with operations like indexing which may panic if the indexes are out of bounds.\n* Never silently discard errors with `let _ =` on fallible operations. Always handle errors appropriately:\n  - Propagate errors with `?` when the calling function should handle them\n  - Use `.log_err()` or similar when you need to ignore errors but want visibility\n  - Use explicit error handling with `match` or `if let Err(...)` when you need custom logic\n  - Example: avoid `let _ = client.request(...).await?;` - use `client.request(...).await?;` instead\n* When implementing async operations that may fail, ensure errors propagate to the UI layer so users get meaningful feedback.\n* Never create files with `mod.rs` paths - prefer `src/some_module.rs` instead of `src/some_module/mod.rs`.",
+  "editable_range": {
+    "start": 0,
+    "end": 1432
+  },
+  "model_version": "local-stub"
+}

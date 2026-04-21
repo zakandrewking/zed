@@ -1,0 +1,15 @@
+{
+  "imported_at": "2026-04-21T18:29:27.794423+00:00",
+  "source_directory": "/tmp/zed-predict-captures-20260421-111437/request-0004",
+  "request_name": "request-0004",
+  "repository_url": "git@github.com:zed-industries/zed.git",
+  "revision": "0daaaca7564d83db8d9a4809ba1dfd9517171630",
+  "trigger": "Other",
+  "mode": "eager",
+  "response_status": 200,
+  "request_id": "stub-request-4",
+  "model_version": "local-stub",
+  "event_count": 1,
+  "related_file_count": 0,
+  "prompt_captured": true
+}

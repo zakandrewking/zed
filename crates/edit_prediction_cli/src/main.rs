@@ -1,4 +1,5 @@
 mod anthropic_client;
+mod capture_import;
 mod capture_summary;
 mod distill;
 mod example;
@@ -52,6 +53,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 
+use crate::capture_import::{ImportCapturesArgs, run_import_captures};
 use crate::capture_summary::{SummarizeCapturesArgs, run_summarize_captures};
 use crate::distill::run_distill;
 use crate::example::{Example, group_examples_by_repo, read_example_files};
@@ -237,6 +239,8 @@ enum Command {
     ServeStub(ServeStubArgs),
     /// Summarize captured native predict-edits artifacts
     SummarizeCaptures(SummarizeCapturesArgs),
+    /// Import captured native predict-edits artifacts into replay fixtures
+    ImportCaptures(ImportCapturesArgs),
 }
 
 impl Display for Command {
@@ -287,6 +291,9 @@ impl Display for Command {
             }
             Command::SummarizeCaptures(_) => {
                 write!(f, "summarize-captures")
+            }
+            Command::ImportCaptures(_) => {
+                write!(f, "import-captures")
             }
         }
     }
@@ -1056,6 +1063,13 @@ fn main() {
             }
             return;
         }
+        Command::ImportCaptures(import_args) => {
+            if let Err(error) = run_import_captures(import_args, args.output.as_ref()) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
 
         Command::Synthesize(synth_args) => {
             let output_dir = if let Some(output_dir) = args.output {
@@ -1304,7 +1318,8 @@ fn main() {
                                         | Command::ImportBatch(_)
                                         | Command::PrintZetaFormats
                                         | Command::ServeStub(_)
-                                        | Command::SummarizeCaptures(_) => {
+                                        | Command::SummarizeCaptures(_)
+                                        | Command::ImportCaptures(_) => {
                                             unreachable!()
                                         }
                                     }
