@@ -30,8 +30,8 @@ use pretty_assertions::{assert_eq, assert_matches};
 use project::{FakeFs, Project};
 use release_channel::AppVersion;
 use serde_json::json;
-use std::env;
 use settings::SettingsStore;
+use std::env;
 use std::{
     ops::Range,
     path::Path,
@@ -219,6 +219,8 @@ async fn test_send_v3_request_uses_custom_predict_edits_url(cx: &mut TestAppCont
         ZED_PREDICT_EDITS_URL_ENV_VAR,
         "http://localhost/custom/predict_edits/v3",
     );
+    init_test(cx);
+    zlog::init_test();
 
     let http_client = FakeHttpClient::create(move |req| {
         let method = req.method().clone();
@@ -231,8 +233,7 @@ async fn test_send_v3_request_uses_custom_predict_edits_url(cx: &mut TestAppCont
                     let mut buf = Vec::new();
                     body.read_to_end(&mut buf).await.ok();
                     let decompressed = zstd::decode_all(&buf[..]).unwrap();
-                    let req: PredictEditsV3Request =
-                        serde_json::from_slice(&decompressed).unwrap();
+                    let req: PredictEditsV3Request = serde_json::from_slice(&decompressed).unwrap();
 
                     Ok(Response::builder()
                         .status(200)
@@ -263,9 +264,8 @@ async fn test_send_v3_request_uses_custom_predict_edits_url(cx: &mut TestAppCont
         }
     });
 
-    let client = cx.update(|cx| {
-        client::Client::new(Arc::new(FakeSystemClock::new()), http_client, cx)
-    });
+    let client =
+        cx.update(|cx| client::Client::new(Arc::new(FakeSystemClock::new()), http_client, cx));
     let user_store = cx.update(|cx| cx.new(|cx| client::UserStore::new(client.clone(), cx)));
     cx.update(|cx| {
         RefreshLlmTokenListener::register(client.clone(), user_store, cx);
