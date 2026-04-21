@@ -162,6 +162,24 @@ if [[ "$stub_only" -eq 0 && ! -x "$zed_binary" ]]; then
 fi
 
 stub_url="http://$bind/predict_edits/v3"
+bind_port="${bind##*:}"
+
+report_bind_conflict() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "predict-edits stub bind address already in use: $bind" >&2
+    return
+  fi
+
+  local listeners
+  listeners="$(lsof -nP -iTCP:"$bind_port" -sTCP:LISTEN 2>/dev/null || true)"
+  if [[ -n "$listeners" ]]; then
+    echo "predict-edits stub bind address already in use: $bind" >&2
+    echo "$listeners" >&2
+    return
+  fi
+
+  echo "predict-edits stub bind address already in use: $bind" >&2
+}
 
 cleanup() {
   if [[ -n "${stub_pid:-}" ]]; then
@@ -181,6 +199,11 @@ else
 fi
 if [[ "$offline_mode" -eq 0 && -n "$upstream_bearer_token" ]]; then
   echo "Upstream bearer token: configured"
+fi
+
+if command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$bind_port" -sTCP:LISTEN >/dev/null 2>&1; then
+  report_bind_conflict
+  exit 1
 fi
 
 stub_command=(
@@ -203,6 +226,11 @@ fi
 stub_pid=$!
 
 sleep 1
+
+if ! kill -0 "$stub_pid" >/dev/null 2>&1; then
+  wait "$stub_pid"
+  exit 1
+fi
 
 export ZED_PREDICT_EDITS_URL="$stub_url"
 
