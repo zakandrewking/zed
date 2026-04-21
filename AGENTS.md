@@ -148,6 +148,7 @@ Prefer tools that:
 Agents should always continue making progress whenever possible.
 
 Default behavior is to continue execution without pausing for approval.
+Continue by default all the way to the next useful verified milestone unless a real blocker or user decision is required.
 
 That means:
 
@@ -156,6 +157,7 @@ That means:
 - if verification is blocked, improve observability
 - if a large task is fuzzy, break it into a narrower one and complete that
 - do not stop to ask for approval just to continue normal execution
+- do not stop after one completed slice if the next slice is clear and low-risk
 
 Only stop to ask the user when:
 

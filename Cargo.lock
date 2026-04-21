@@ -5295,12 +5295,14 @@ dependencies = [
  "telemetry_events",
  "tempfile",
  "terminal_view",
+ "tiny_http",
  "toml 0.8.23",
  "util",
  "wasmtime",
  "watch",
  "workspace",
  "zeta_prompt",
+ "zstd",
 ]
 
 [[package]]

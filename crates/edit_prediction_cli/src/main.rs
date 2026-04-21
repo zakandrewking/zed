@@ -23,6 +23,7 @@ mod reversal_tracking;
 mod score;
 mod split_commit;
 mod split_dataset;
+mod stub;
 
 mod synthesize;
 mod truncate_expected_patch;
@@ -63,6 +64,7 @@ use crate::retrieve_context::run_context_retrieval;
 use crate::score::run_scoring;
 use crate::split_commit::SplitCommitArgs;
 use crate::split_dataset::SplitArgs;
+use crate::stub::{ServeStubArgs, run_serve_stub};
 use crate::synthesize::{SynthesizeConfig, run_synthesize};
 use crate::truncate_expected_patch::TruncatePatchArgs;
 
@@ -229,6 +231,8 @@ enum Command {
     Repair(repair::RepairArgs),
     /// Print all valid zeta formats (lowercase, one per line)
     PrintZetaFormats,
+    /// Serve a local native predict-edits V3 stub for manual testing
+    ServeStub(ServeStubArgs),
 }
 
 impl Display for Command {
@@ -273,6 +277,9 @@ impl Display for Command {
             }
             Command::PrintZetaFormats => {
                 write!(f, "print-zeta-formats")
+            }
+            Command::ServeStub(_) => {
+                write!(f, "serve-stub")
             }
         }
     }
@@ -1028,6 +1035,13 @@ fn main() {
             }
             return;
         }
+        Command::ServeStub(stub_args) => {
+            if let Err(error) = run_serve_stub(stub_args) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
 
         Command::Synthesize(synth_args) => {
             let output_dir = if let Some(output_dir) = args.output {
@@ -1274,7 +1288,8 @@ fn main() {
                                         | Command::TruncatePatch(_)
                                         | Command::FilterLanguages(_)
                                         | Command::ImportBatch(_)
-                                        | Command::PrintZetaFormats => {
+                                        | Command::PrintZetaFormats
+                                        | Command::ServeStub(_) => {
                                             unreachable!()
                                         }
                                     }
