@@ -145,7 +145,9 @@ Prefer tools that:
 
 ## Progress Expectations
 
-Agents should continue making progress whenever possible.
+Agents should always continue making progress whenever possible.
+
+Default behavior is to continue execution without pausing for approval.
 
 That means:
 
@@ -153,6 +155,7 @@ That means:
 - if implementation is blocked, improve verification or tooling
 - if verification is blocked, improve observability
 - if a large task is fuzzy, break it into a narrower one and complete that
+- do not stop to ask for approval just to continue normal execution
 
 Only stop to ask the user when:
 
@@ -265,6 +268,7 @@ Do not jump to prompt tweaking or quantization experiments before native routing
 - leave artifacts that help the next session
 - commit coherent slices
 - tighten scope when blocked
+- continue by default unless a real blocker or decision requires the user
 
 ## Bad Agent Behavior In This Repo
 
