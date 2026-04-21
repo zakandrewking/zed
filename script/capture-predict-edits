@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+
+bind="127.0.0.1:3000"
+artifact_dir=""
+passthrough_url="${ZED_PREDICT_CAPTURE_PASSTHROUGH_URL:-https://cloud.zed.dev/predict_edits/v3}"
+user_data_dir=""
+build_binaries=1
+stub_only=0
+release_mode=0
+
+zed_args=()
+
+print_help() {
+  cat <<'EOF'
+Usage:
+  script/capture-predict-edits [options] [-- <zed args>]
+
+Starts the native predict-edits passthrough stub, points Zed at it with
+ZED_PREDICT_EDITS_URL, and optionally launches the local Zed binary in the
+foreground so real edit-prediction traffic is captured into artifacts.
+
+Options:
+  --bind <host:port>         Stub bind address. Default: 127.0.0.1:3000
+  --artifact-dir <dir>       Directory for captured request/response artifacts.
+                             Default: /tmp/zed-predict-captures-<timestamp>
+  --passthrough-url <url>    Upstream native predict-edits URL.
+                             Default: https://cloud.zed.dev/predict_edits/v3
+  --user-data-dir <dir>      Pass a custom Zed user data dir.
+  --zed-binary <path>        Override the Zed binary path.
+  --ep-binary <path>         Override the ep CLI binary path.
+  --release                  Build and launch target/release binaries.
+  --no-build                 Reuse existing binaries.
+  --stub-only                Start capture stub but do not launch Zed.
+  --help                     Print this help text.
+
+Examples:
+  script/capture-predict-edits
+  script/capture-predict-edits -- --foreground
+  script/capture-predict-edits --artifact-dir /tmp/zed-captures -- my/project
+EOF
+}
+
+zed_binary=""
+ep_binary=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --bind)
+      bind="$2"
+      shift 2
+      ;;
+    --artifact-dir)
+      artifact_dir="$2"
+      shift 2
+      ;;
+    --passthrough-url)
+      passthrough_url="$2"
+      shift 2
+      ;;
+    --user-data-dir)
+      user_data_dir="$2"
+      shift 2
+      ;;
+    --zed-binary)
+      zed_binary="$2"
+      shift 2
+      ;;
+    --ep-binary)
+      ep_binary="$2"
+      shift 2
+      ;;
+    --release)
+      release_mode=1
+      shift
+      ;;
+    --no-build)
+      build_binaries=0
+      shift
+      ;;
+    --stub-only)
+      stub_only=1
+      shift
+      ;;
+    --help)
+      print_help
+      exit 0
+      ;;
+    --)
+      shift
+      zed_args=("$@")
+      break
+      ;;
+    *)
+      zed_args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "$artifact_dir" ]]; then
+  artifact_dir="/tmp/zed-predict-captures-$timestamp"
+fi
+
+mkdir -p "$artifact_dir"
+
+profile_dir="debug"
+if [[ "$release_mode" -eq 1 ]]; then
+  profile_dir="release"
+fi
+
+if [[ -z "$zed_binary" ]]; then
+  zed_binary="$repo_root/target/$profile_dir/zed"
+fi
+
+if [[ -z "$ep_binary" ]]; then
+  ep_binary="$repo_root/target/$profile_dir/ep"
+fi
+
+if [[ "$build_binaries" -eq 1 ]]; then
+  cargo_args=(build -p edit_prediction_cli --bin ep -p zed --bin zed)
+  if [[ "$release_mode" -eq 1 ]]; then
+    cargo_args+=(--release)
+  fi
+
+  (
+    cd "$repo_root"
+    export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+    cargo "${cargo_args[@]}"
+  )
+fi
+
+if [[ ! -x "$ep_binary" ]]; then
+  echo "ep binary not found at $ep_binary" >&2
+  exit 1
+fi
+
+if [[ "$stub_only" -eq 0 && ! -x "$zed_binary" ]]; then
+  echo "zed binary not found at $zed_binary" >&2
+  exit 1
+fi
+
+stub_url="http://$bind/predict_edits/v3"
+
+cleanup() {
+  if [[ -n "${stub_pid:-}" ]]; then
+    kill "$stub_pid" >/dev/null 2>&1 || true
+    wait "$stub_pid" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+echo "Artifact dir: $artifact_dir"
+echo "Passthrough URL: $passthrough_url"
+echo "Stub URL: $stub_url"
+
+"$ep_binary" serve-stub \
+  --bind "$bind" \
+  --passthrough-url "$passthrough_url" \
+  --artifact-dir "$artifact_dir" &
+stub_pid=$!
+
+sleep 1
+
+export ZED_PREDICT_EDITS_URL="$stub_url"
+
+if [[ "$stub_only" -eq 1 ]]; then
+  echo "Stub running with PID $stub_pid"
+  wait "$stub_pid"
+  exit 0
+fi
+
+zed_command=("$zed_binary")
+if [[ -n "$user_data_dir" ]]; then
+  zed_command+=(--user-data-dir "$user_data_dir")
+fi
+zed_command+=("${zed_args[@]}")
+
+echo "Launching: ${zed_command[*]}"
+"${zed_command[@]}"
