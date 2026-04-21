@@ -28,6 +28,9 @@ pub struct ServeStubArgs {
     /// Apply a unified diff to the request's editable region and return the result.
     #[arg(long)]
     pub diff_file: Option<PathBuf>,
+    /// Return the request's editable region unchanged to produce a local no-op response.
+    #[arg(long)]
+    pub echo_editable_region: bool,
     /// Forward the raw request to this upstream native predict-edits endpoint.
     #[arg(long)]
     pub passthrough_url: Option<String>,
@@ -53,6 +56,7 @@ pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
         args.response_text.is_some(),
         args.response_file.is_some(),
         args.diff_file.is_some(),
+        args.echo_editable_region,
         args.passthrough_url.is_some(),
     ]
     .into_iter()
@@ -61,7 +65,7 @@ pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
 
     if configured_response_sources > 1 {
         bail!(
-            "choose at most one of --response-text, --response-file, --diff-file, or --passthrough-url"
+            "choose at most one of --response-text, --response-file, --diff-file, --echo-editable-region, or --passthrough-url"
         );
     }
 
@@ -249,6 +253,8 @@ fn build_local_response_payload(
             .with_context(|| format!("failed to read diff file {}", diff_file.display()))?;
         apply_diff_to_string(&diff, &old_editable)
             .context("failed to apply diff to editable region")?
+    } else if args.echo_editable_region {
+        old_editable
     } else {
         String::new()
     };
