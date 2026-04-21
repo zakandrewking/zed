@@ -2518,6 +2518,13 @@ struct RequestChannels {
 fn init_test_with_fake_client(
     cx: &mut TestAppContext,
 ) -> (Entity<EditPredictionStore>, RequestChannels) {
+    init_test_with_fake_client_at_predict_path(cx, "/predict_edits/v3")
+}
+
+fn init_test_with_fake_client_at_predict_path(
+    cx: &mut TestAppContext,
+    predict_path: &'static str,
+) -> (Entity<EditPredictionStore>, RequestChannels) {
     cx.update(move |cx| {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
@@ -2527,18 +2534,20 @@ fn init_test_with_fake_client(
         let (reject_req_tx, reject_req_rx) = mpsc::unbounded();
 
         let http_client = FakeHttpClient::create({
+            let predict_path = predict_path.to_string();
             move |req| {
                 let uri = req.uri().path().to_string();
                 let mut body = req.into_body();
                 let predict_req_tx = predict_req_tx.clone();
                 let reject_req_tx = reject_req_tx.clone();
+                let predict_path = predict_path.clone();
                 async move {
                     let resp = match uri.as_str() {
                         "/client/llm_tokens" => serde_json::to_string(&json!({
                             "token": "test"
                         }))
                         .unwrap(),
-                        "/predict_edits/v3" => {
+                        path if path == predict_path.as_str() => {
                             let mut buf = Vec::new();
                             body.read_to_end(&mut buf).await.ok();
                             let decompressed = zstd::decode_all(&buf[..]).unwrap();
@@ -2583,6 +2592,93 @@ fn init_test_with_fake_client(
             },
         )
     })
+}
+
+#[gpui::test]
+async fn test_custom_predict_edits_url_routes_full_prediction_flow(cx: &mut TestAppContext) {
+    let _custom_url = ScopedEnvironmentVariable::set(
+        ZED_PREDICT_EDITS_URL_ENV_VAR,
+        "http://localhost/custom/predict_edits/v3",
+    );
+    let (ep_store, mut requests) =
+        init_test_with_fake_client_at_predict_path(cx, "/custom/predict_edits/v3");
+
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "1.txt": "Hello!\nHow\nBye\n",
+        }),
+    )
+    .await;
+    let project = Project::test(fs, vec![path!("/root").as_ref()], cx).await;
+
+    let buffer = project
+        .update(cx, |project, cx| {
+            let path = project.find_project_path(path!("/root/1.txt"), cx).unwrap();
+            project.set_active_path(Some(path.clone()), cx);
+            project.open_buffer(path, cx)
+        })
+        .await
+        .unwrap();
+    let snapshot = buffer.read_with(cx, |buffer, _cx| buffer.snapshot());
+    let position = snapshot.anchor_before(language::Point::new(1, 3));
+
+    ep_store.update(cx, |ep_store, cx| {
+        ep_store.register_project(&project, cx);
+        ep_store.register_buffer(&buffer, &project, cx);
+    });
+
+    ep_store.update(cx, |ep_store, cx| {
+        ep_store.refresh_prediction_from_buffer(project.clone(), buffer.clone(), position, cx)
+    });
+    let (request, respond_tx) = requests.predict.next().await.unwrap();
+
+    respond_tx
+        .send(model_response(
+            &request,
+            indoc! {r"
+                --- a/root/1.txt
+                +++ b/root/1.txt
+                @@ ... @@
+                 Hello!
+                -How
+                +How are you?
+                 Bye
+            "},
+        ))
+        .unwrap();
+
+    cx.run_until_parked();
+
+    let edits = ep_store.update(cx, |ep_store, cx| {
+        let prediction = ep_store.prediction_at(&buffer, None, &project, cx).unwrap();
+        let prediction = match prediction {
+            BufferEditPrediction::Local { prediction } => prediction,
+            BufferEditPrediction::Jump { .. } => panic!("expected a local prediction"),
+        };
+        from_completion_edits(&prediction.edits, &buffer, cx)
+    });
+
+    assert_eq!(edits, vec![(10..10, " are you?".into())]);
+
+    buffer.update(cx, |buffer, cx| {
+        let anchor_edits = edits
+            .into_iter()
+            .map(|(range, text)| {
+                (
+                    buffer.anchor_after(range.start)..buffer.anchor_before(range.end),
+                    text,
+                )
+            })
+            .collect::<Vec<_>>();
+        buffer.edit(anchor_edits, None, cx)
+    });
+
+    assert_eq!(
+        buffer.read_with(cx, |buffer, _cx| buffer.text()),
+        "Hello!\nHow are you?\nBye\n"
+    );
 }
 
 #[gpui::test]
