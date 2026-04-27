@@ -40,15 +40,18 @@ Verified artifacts now in place:
 - capture replay reports for default and all Zeta formats
 - output safety replay command and report
 - raw model-output normalization mode in the local stub
+- dynamic raw model-output command mode in the local stub, with prompt/request JSON stdin options and timeout handling
 
 Latest verified commands:
+- `cargo test -p edit_prediction_cli model_command -- --nocapture`
 - `cargo test -p edit_prediction_cli model_output_response -- --nocapture`
 - `cargo test -p edit_prediction_cli capture_ -- --nocapture`
 - `./script/clippy -p edit_prediction_cli`
 - `target/debug/ep replay-output-safety --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/output-safety-report.md`
+- live smoke: `ep serve-stub --model-command /bin/sh --model-command-arg=-c --model-command-arg 'sleep 2' --model-command-timeout-ms 10 --once` rejected a captured request with `/bin/sh timed out after 10 ms`
 
 Immediate next useful milestone:
-- make the stub/shim consume dynamic raw model output from a local backend process instead of only static `--model-output-*` fixtures.
+- add an offline replay runner that invokes the same model-command adapter against captured fixtures and reports latency plus output safety.
 
 Fallback if local backend integration stalls:
 - add file-watching or stdin-driven raw output mode first, then connect a real model runtime behind that stable boundary.
