@@ -1,6 +1,8 @@
 use crate::capture_safety::{OutputSafetyResult, assess_zeta_model_output};
 use crate::capture_summary::{capture_request_directories, load_capture_summary};
-use crate::stub::{ModelCommandConfig, ModelCommandInput, run_model_command};
+use crate::stub::{
+    ModelCommandConfig, ModelCommandInput, ModelHttpConfig, run_model_command, run_model_http,
+};
 use anyhow::{Context as _, Result};
 use clap::Args;
 use gpui::BackgroundExecutor;
@@ -19,7 +21,7 @@ pub struct ReplayModelCommandArgs {
     pub format: Option<String>,
     /// Run this command once per request and parse stdout as raw Zeta model output.
     #[arg(long)]
-    pub model_command: PathBuf,
+    pub model_command: Option<PathBuf>,
     /// Argument to pass to --model-command. May be repeated.
     #[arg(long = "model-command-arg")]
     pub model_command_args: Vec<String>,
@@ -29,12 +31,21 @@ pub struct ReplayModelCommandArgs {
     /// Kill --model-command if it does not finish within this many milliseconds.
     #[arg(long, default_value_t = 30_000)]
     pub model_command_timeout_ms: u64,
+    /// POST each request to this long-lived local model endpoint and parse its response as raw Zeta output.
+    #[arg(long)]
+    pub model_http_url: Option<String>,
+    /// Input sent to --model-http-url.
+    #[arg(long, default_value = "prompt")]
+    pub model_http_input: ModelCommandInput,
+    /// Fail --model-http-url if it does not respond within this many milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    pub model_http_timeout_ms: u64,
 }
 
 #[derive(Debug)]
 struct ModelReplayResult {
     request_name: String,
-    command_ok: bool,
+    backend_ok: bool,
     latency_ms: Option<u128>,
     raw_output_bytes: Option<usize>,
     safety: Option<OutputSafetyResult>,
@@ -49,6 +60,17 @@ pub fn run_replay_model_command(
     if args.model_command_timeout_ms == 0 {
         anyhow::bail!("--model-command-timeout-ms must be greater than zero");
     }
+    if args.model_http_timeout_ms == 0 {
+        anyhow::bail!("--model-http-timeout-ms must be greater than zero");
+    }
+    let configured_backends =
+        usize::from(args.model_command.is_some()) + usize::from(args.model_http_url.is_some());
+    if configured_backends != 1 {
+        anyhow::bail!("choose exactly one of --model-command or --model-http-url");
+    }
+    if !args.model_command_args.is_empty() && args.model_command.is_none() {
+        anyhow::bail!("--model-command-arg requires --model-command");
+    }
 
     let format = args
         .format
@@ -56,12 +78,7 @@ pub fn run_replay_model_command(
         .map(ZetaFormat::parse)
         .transpose()?
         .unwrap_or_default();
-    let config = ModelCommandConfig {
-        command: args.model_command.clone(),
-        args: args.model_command_args.clone(),
-        input: args.model_command_input,
-        timeout_ms: args.model_command_timeout_ms,
-    };
+    let backend = ModelReplayBackend::from_args(args);
     let capture_directories = capture_request_directories(&args.directory)?;
     let mut results = Vec::new();
 
@@ -71,7 +88,7 @@ pub fn run_replay_model_command(
         let Some(request) = capture.parsed_request.as_ref() else {
             results.push(ModelReplayResult {
                 request_name: capture.name,
-                command_ok: false,
+                backend_ok: false,
                 latency_ms: None,
                 raw_output_bytes: None,
                 safety: None,
@@ -81,7 +98,7 @@ pub fn run_replay_model_command(
         };
 
         let started_at = Instant::now();
-        match run_model_command(&config, request, &background_executor) {
+        match backend.run(request, &background_executor) {
             Ok(raw_output) => {
                 let latency_ms = started_at.elapsed().as_millis();
                 let safety = assess_zeta_model_output(
@@ -93,7 +110,7 @@ pub fn run_replay_model_command(
                 );
                 results.push(ModelReplayResult {
                     request_name: capture.name,
-                    command_ok: true,
+                    backend_ok: true,
                     latency_ms: Some(latency_ms),
                     raw_output_bytes: Some(raw_output.len()),
                     safety: Some(safety),
@@ -103,7 +120,7 @@ pub fn run_replay_model_command(
             Err(error) => {
                 results.push(ModelReplayResult {
                     request_name: capture.name,
-                    command_ok: false,
+                    backend_ok: false,
                     latency_ms: Some(started_at.elapsed().as_millis()),
                     raw_output_bytes: None,
                     safety: None,
@@ -128,6 +145,41 @@ pub fn run_replay_model_command(
     Ok(())
 }
 
+enum ModelReplayBackend {
+    Command(ModelCommandConfig),
+    Http(ModelHttpConfig),
+}
+
+impl ModelReplayBackend {
+    fn from_args(args: &ReplayModelCommandArgs) -> Self {
+        if let Some(command) = &args.model_command {
+            Self::Command(ModelCommandConfig {
+                command: command.clone(),
+                args: args.model_command_args.clone(),
+                input: args.model_command_input,
+                timeout_ms: args.model_command_timeout_ms,
+            })
+        } else {
+            Self::Http(ModelHttpConfig {
+                url: args.model_http_url.clone().expect("validated is_some"),
+                input: args.model_http_input,
+                timeout_ms: args.model_http_timeout_ms,
+            })
+        }
+    }
+
+    fn run(
+        &self,
+        request: &cloud_llm_client::predict_edits_v3::PredictEditsV3Request,
+        background_executor: &BackgroundExecutor,
+    ) -> Result<String> {
+        match self {
+            Self::Command(config) => run_model_command(config, request, background_executor),
+            Self::Http(config) => run_model_http(config, request, background_executor),
+        }
+    }
+}
+
 fn render_model_replay_report(
     directory: &Path,
     format: ZetaFormat,
@@ -135,7 +187,7 @@ fn render_model_replay_report(
 ) -> String {
     let summary = model_replay_summary(results);
     let mut output = String::new();
-    _ = writeln!(output, "# Model Command Replay Report");
+    _ = writeln!(output, "# Model Backend Replay Report");
     _ = writeln!(output);
     _ = writeln!(output, "Directory: `{}`", directory.display());
     _ = writeln!(output, "Format: `{format}`");
@@ -145,12 +197,12 @@ fn render_model_replay_report(
     _ = writeln!(output, "- Requests: `{}`", summary.total);
     _ = writeln!(
         output,
-        "- Command successes: `{}`",
-        summary.command_successes
+        "- Backend successes: `{}`",
+        summary.backend_successes
     );
     _ = writeln!(output, "- Safe outputs: `{}`", summary.safe_outputs);
     _ = writeln!(output, "- Unsafe outputs: `{}`", summary.unsafe_outputs);
-    _ = writeln!(output, "- Command failures: `{}`", summary.command_failures);
+    _ = writeln!(output, "- Backend failures: `{}`", summary.backend_failures);
     _ = writeln!(
         output,
         "- p50 latency ms: `{}`",
@@ -171,7 +223,7 @@ fn render_model_replay_report(
     _ = writeln!(output);
     _ = writeln!(
         output,
-        "| Request | Command | Safe | Latency ms | Raw Bytes | Reasons | Error |"
+        "| Request | Backend | Safe | Latency ms | Raw Bytes | Reasons | Error |"
     );
     _ = writeln!(output, "| --- | --- | --- | ---: | ---: | --- | --- |");
     for result in results {
@@ -189,7 +241,7 @@ fn render_model_replay_report(
             output,
             "| `{}` | `{}` | `{}` | `{}` | `{}` | {} | {} |",
             escape_table_cell(&result.request_name),
-            yes_no(result.command_ok),
+            yes_no(result.backend_ok),
             safe,
             result
                 .latency_ms
@@ -210,8 +262,8 @@ fn render_model_replay_report(
 #[derive(Debug)]
 struct ModelReplaySummary {
     total: usize,
-    command_successes: usize,
-    command_failures: usize,
+    backend_successes: usize,
+    backend_failures: usize,
     safe_outputs: usize,
     unsafe_outputs: usize,
     p50_ms: Option<u128>,
@@ -221,8 +273,8 @@ struct ModelReplaySummary {
 
 fn model_replay_summary(results: &[ModelReplayResult]) -> ModelReplaySummary {
     let total = results.len();
-    let command_successes = results.iter().filter(|result| result.command_ok).count();
-    let command_failures = total - command_successes;
+    let backend_successes = results.iter().filter(|result| result.backend_ok).count();
+    let backend_failures = total - backend_successes;
     let safe_outputs = results
         .iter()
         .filter(|result| {
@@ -249,8 +301,8 @@ fn model_replay_summary(results: &[ModelReplayResult]) -> ModelReplaySummary {
 
     ModelReplaySummary {
         total,
-        command_successes,
-        command_failures,
+        backend_successes,
+        backend_failures,
         safe_outputs,
         unsafe_outputs,
         p50_ms: percentile(&latencies, 50),
@@ -325,13 +377,16 @@ mod tests {
         let args = ReplayModelCommandArgs {
             directory: directory.path().to_path_buf(),
             format: None,
-            model_command: PathBuf::from("/bin/sh"),
+            model_command: Some(PathBuf::from("/bin/sh")),
             model_command_args: vec![
                 script_path.display().to_string(),
                 output_path.display().to_string(),
             ],
             model_command_input: ModelCommandInput::Prompt,
             model_command_timeout_ms: 30_000,
+            model_http_url: None,
+            model_http_input: ModelCommandInput::Prompt,
+            model_http_timeout_ms: 30_000,
         };
         let output_path = directory.path().join("model-replay.md");
 
@@ -339,7 +394,7 @@ mod tests {
 
         let report = std::fs::read_to_string(output_path).unwrap();
         assert!(report.contains("- Requests: `1`"));
-        assert!(report.contains("- Command successes: `1`"));
+        assert!(report.contains("- Backend successes: `1`"));
         assert!(report.contains("- Safe outputs: `1`"));
         assert!(report.contains("| `request-0001` | `yes` | `yes` |"));
     }

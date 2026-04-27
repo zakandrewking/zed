@@ -6,8 +6,9 @@ use clap::{Args, ValueEnum};
 use cloud_llm_client::predict_edits_v3::{PredictEditsV3Request, PredictEditsV3Response};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, pin_mut, select};
 use gpui::BackgroundExecutor;
-use http_client::{AsyncBody, Method as HttpMethod};
+use http_client::{AsyncBody, HttpClient as _, Method as HttpMethod};
 use reqwest_client::ReqwestClient;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -52,6 +53,15 @@ pub struct ServeStubArgs {
     /// Kill --model-command if it does not finish within this many milliseconds.
     #[arg(long, default_value_t = 30_000)]
     pub model_command_timeout_ms: u64,
+    /// POST each request to this long-lived local model endpoint and parse its response as raw Zeta output.
+    #[arg(long)]
+    pub model_http_url: Option<String>,
+    /// Input sent to --model-http-url.
+    #[arg(long, default_value = "prompt")]
+    pub model_http_input: ModelCommandInput,
+    /// Fail --model-http-url if it does not respond within this many milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    pub model_http_timeout_ms: u64,
     /// Send parsed raw model output even if local safety checks reject it.
     #[arg(long)]
     pub allow_unsafe_model_output: bool,
@@ -86,6 +96,13 @@ pub(crate) struct ModelCommandConfig {
     pub(crate) timeout_ms: u64,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ModelHttpConfig {
+    pub(crate) url: String,
+    pub(crate) input: ModelCommandInput,
+    pub(crate) timeout_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum ModelCommandInput {
     /// Send the formatted default Zeta prompt on stdin.
@@ -112,6 +129,7 @@ pub fn run_serve_stub(args: &ServeStubArgs, background_executor: BackgroundExecu
         args.model_output_text.is_some(),
         args.model_output_file.is_some(),
         args.model_command.is_some(),
+        args.model_http_url.is_some(),
         args.echo_editable_region,
         args.passthrough_url.is_some(),
     ]
@@ -121,7 +139,7 @@ pub fn run_serve_stub(args: &ServeStubArgs, background_executor: BackgroundExecu
 
     if configured_response_sources > 1 {
         bail!(
-            "choose at most one of --response-text, --response-file, --diff-file, --model-output-text, --model-output-file, --model-command, --echo-editable-region, or --passthrough-url"
+            "choose at most one of --response-text, --response-file, --diff-file, --model-output-text, --model-output-file, --model-command, --model-http-url, --echo-editable-region, or --passthrough-url"
         );
     }
     if !args.model_command_args.is_empty() && args.model_command.is_none() {
@@ -129,6 +147,9 @@ pub fn run_serve_stub(args: &ServeStubArgs, background_executor: BackgroundExecu
     }
     if args.model_command_timeout_ms == 0 {
         bail!("--model-command-timeout-ms must be greater than zero");
+    }
+    if args.model_http_timeout_ms == 0 {
+        bail!("--model-http-timeout-ms must be greater than zero");
     }
 
     let server = Server::http(&args.bind)
@@ -311,6 +332,7 @@ fn build_local_response_payload(
     if args.model_output_text.is_some()
         || args.model_output_file.is_some()
         || args.model_command.is_some()
+        || args.model_http_url.is_some()
     {
         return build_model_output_response_payload(
             args,
@@ -447,7 +469,106 @@ fn read_raw_model_output(
         return run_model_command(&config, request, background_executor);
     }
 
+    if let Some(model_http_url) = &args.model_http_url {
+        let config = ModelHttpConfig {
+            url: model_http_url.clone(),
+            input: args.model_http_input,
+            timeout_ms: args.model_http_timeout_ms,
+        };
+        return run_model_http(&config, request, background_executor);
+    }
+
     Ok(String::new())
+}
+
+pub(crate) fn run_model_http(
+    config: &ModelHttpConfig,
+    request: &PredictEditsV3Request,
+    background_executor: &BackgroundExecutor,
+) -> Result<String> {
+    let body = model_http_request_body(config.input, request)?;
+    let timeout = Duration::from_millis(config.timeout_ms);
+    let http_client = ReqwestClient::new();
+
+    smol::block_on(async {
+        let request = http_client::Request::builder()
+            .method(HttpMethod::POST)
+            .uri(&config.url)
+            .header("Content-Type", "application/json")
+            .body(AsyncBody::from(body))
+            .context("failed to build model HTTP request")?;
+        let send = http_client.send(request).fuse();
+        let timeout = background_executor.timer(timeout).fuse();
+        pin_mut!(send, timeout);
+
+        let mut response = select! {
+            result = send => result.context("failed to send model HTTP request")?,
+            _ = timeout => bail!("{} timed out after {} ms", config.url, config.timeout_ms),
+        };
+
+        let status = response.status();
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .read_to_end(&mut body)
+            .await
+            .context("failed to read model HTTP response body")?;
+
+        if !status.is_success() {
+            bail!(
+                "model HTTP endpoint {} returned {}: {}",
+                config.url,
+                status,
+                String::from_utf8_lossy(&body).trim()
+            );
+        }
+
+        parse_model_http_response_body(&body)
+    })
+}
+
+#[derive(Serialize)]
+struct ModelHttpRequestBody<'a> {
+    input: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<&'a PredictEditsV3Request>,
+}
+
+#[derive(Deserialize)]
+struct ModelHttpResponseBody {
+    output: String,
+}
+
+fn model_http_request_body(
+    input: ModelCommandInput,
+    request: &PredictEditsV3Request,
+) -> Result<Vec<u8>> {
+    let body = match input {
+        ModelCommandInput::Prompt => ModelHttpRequestBody {
+            input: "prompt",
+            prompt: Some(
+                format_zeta_prompt(&request.input, Default::default())
+                    .context("failed to format prompt for model HTTP request")?,
+            ),
+            request: None,
+        },
+        ModelCommandInput::RequestJson => ModelHttpRequestBody {
+            input: "request-json",
+            prompt: None,
+            request: Some(request),
+        },
+    };
+
+    serde_json::to_vec(&body).context("failed to serialize model HTTP request")
+}
+
+fn parse_model_http_response_body(body: &[u8]) -> Result<String> {
+    match serde_json::from_slice::<ModelHttpResponseBody>(body) {
+        Ok(response) => Ok(response.output),
+        Err(_) => String::from_utf8(body.to_vec()).context("model HTTP response was not UTF-8"),
+    }
 }
 
 pub(crate) fn run_model_command(
@@ -813,6 +934,9 @@ mod tests {
             model_command_args: Vec::new(),
             model_command_input: ModelCommandInput::Prompt,
             model_command_timeout_ms: 30_000,
+            model_http_url: None,
+            model_http_input: ModelCommandInput::Prompt,
+            model_http_timeout_ms: 30_000,
             allow_unsafe_model_output: false,
             echo_editable_region: false,
             passthrough_url: None,
@@ -864,6 +988,9 @@ mod tests {
             model_command_args: Vec::new(),
             model_command_input: ModelCommandInput::Prompt,
             model_command_timeout_ms: 30_000,
+            model_http_url: None,
+            model_http_input: ModelCommandInput::Prompt,
+            model_http_timeout_ms: 30_000,
             allow_unsafe_model_output: false,
             echo_editable_region: false,
             passthrough_url: None,
@@ -921,6 +1048,9 @@ mod tests {
             ],
             model_command_input: ModelCommandInput::Prompt,
             model_command_timeout_ms: 30_000,
+            model_http_url: None,
+            model_http_input: ModelCommandInput::Prompt,
+            model_http_timeout_ms: 30_000,
             allow_unsafe_model_output: false,
             echo_editable_region: false,
             passthrough_url: None,
@@ -943,6 +1073,32 @@ mod tests {
         assert_eq!(
             response.model_version.as_deref(),
             Some("local-stub-model-output")
+        );
+    }
+
+    #[test]
+    fn model_http_protocol_supports_json_and_plain_text_responses() {
+        let request = PredictEditsV3Request {
+            input: test_prompt_input(),
+            trigger: Default::default(),
+        };
+        let body = model_http_request_body(ModelCommandInput::RequestJson, &request).unwrap();
+        let request_json = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(request_json["input"], "request-json");
+        assert!(request_json.get("request").is_some());
+
+        let body = model_http_request_body(ModelCommandInput::Prompt, &request).unwrap();
+        let prompt_json = serde_json::from_slice::<serde_json::Value>(&body).unwrap();
+        assert_eq!(prompt_json["input"], "prompt");
+        assert!(prompt_json["prompt"].as_str().unwrap().contains("fn main"));
+
+        assert_eq!(
+            parse_model_http_response_body(br#"{"output":"safe output"}"#).unwrap(),
+            "safe output"
+        );
+        assert_eq!(
+            parse_model_http_response_body(b"plain raw output").unwrap(),
+            "plain raw output"
         );
     }
 

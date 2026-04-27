@@ -42,21 +42,25 @@ Verified artifacts now in place:
 - raw model-output normalization mode in the local stub
 - dynamic raw model-output command mode in the local stub, with prompt/request JSON stdin options and timeout handling
 - offline model-command replay for capture fixtures with latency and safety reporting
+- long-lived HTTP model backend mode in the local stub, with prompt/request JSON inputs, timeout handling, and JSON/plain-text output support
+- offline HTTP model backend replay for capture fixtures with latency and safety reporting
 
 Latest verified commands:
 - `cargo test -p edit_prediction_cli model_command -- --nocapture`
+- `cargo test -p edit_prediction_cli model_http -- --nocapture`
 - `cargo test -p edit_prediction_cli model_output_response -- --nocapture`
 - `cargo test -p edit_prediction_cli capture_ -- --nocapture`
 - `./script/clippy -p edit_prediction_cli`
 - `target/debug/ep replay-output-safety --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/output-safety-report.md`
 - `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-command /usr/bin/ruby --model-command-arg=-rjson --model-command-arg=-e --model-command-arg 'r=JSON.parse(STDIN.read); g=r["excerpt_ranges"]["editable_350"]; print r["cursor_excerpt"][g["start"]...g["end"]]' --model-command-input request-json -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/model-command-replay-report.md`
 - live smoke: `ep serve-stub --model-command /bin/sh --model-command-arg=-c --model-command-arg 'sleep 2' --model-command-timeout-ms 10 --once` rejected a captured request with `/bin/sh timed out after 10 ms`
+- live smoke: `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-http-url http://127.0.0.1:3297/predict --model-http-input request-json -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/model-http-replay-report.md` produced 13/13 backend successes and 13/13 safe outputs against a local HTTP adapter
 
 Immediate next useful milestone:
-- add a minimal long-lived local inference adapter protocol so the replay/stub path can avoid one process spawn per prediction.
+- connect a real local inference server behind `--model-http-url` and generate latency/safety reports from the native capture fixtures.
 
 Fallback if local backend integration stalls:
-- add file-watching or stdin-driven raw output mode first, then connect a real model runtime behind that stable boundary.
+- keep the HTTP adapter boundary stable and use a deterministic fake model server while iterating on the first MLX or llama.cpp shim.
 
 ---
 
