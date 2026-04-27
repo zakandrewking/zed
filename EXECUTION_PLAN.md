@@ -44,8 +44,11 @@ Verified artifacts now in place:
 - offline model-command replay for capture fixtures with latency and safety reporting
 - long-lived HTTP model backend mode in the local stub, with prompt/request JSON inputs, timeout handling, and JSON/plain-text output support
 - offline HTTP model backend replay for capture fixtures with latency and safety reporting
+- local OpenAI-compatible model adapter that bridges native Zeta prompts to a `/v1/completions`-style endpoint
+- model adapter replay report proving the adapter boundary works over the native capture fixtures
 
 Latest verified commands:
+- `cargo test -p edit_prediction_cli model_adapter -- --nocapture`
 - `cargo test -p edit_prediction_cli model_command -- --nocapture`
 - `cargo test -p edit_prediction_cli model_http -- --nocapture`
 - `cargo test -p edit_prediction_cli model_output_response -- --nocapture`
@@ -55,9 +58,10 @@ Latest verified commands:
 - `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-command /usr/bin/ruby --model-command-arg=-rjson --model-command-arg=-e --model-command-arg 'r=JSON.parse(STDIN.read); g=r["excerpt_ranges"]["editable_350"]; print r["cursor_excerpt"][g["start"]...g["end"]]' --model-command-input request-json -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/model-command-replay-report.md`
 - live smoke: `ep serve-stub --model-command /bin/sh --model-command-arg=-c --model-command-arg 'sleep 2' --model-command-timeout-ms 10 --once` rejected a captured request with `/bin/sh timed out after 10 ms`
 - live smoke: `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-http-url http://127.0.0.1:3297/predict --model-http-input request-json -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/model-http-replay-report.md` produced 13/13 backend successes and 13/13 safe outputs against a local HTTP adapter
+- live smoke: `target/debug/ep serve-model-adapter --bind 127.0.0.1:3297 --path /predict --completions-url http://127.0.0.1:3298/v1/completions --max-tokens 256` plus replay through `--model-http-url http://127.0.0.1:3297/predict` produced 13/13 backend successes and 13/13 safe outputs against a fake OpenAI-compatible completions server
 
 Immediate next useful milestone:
-- connect a real local inference server behind `--model-http-url` and generate latency/safety reports from the native capture fixtures.
+- connect a real local inference server behind `ep serve-model-adapter` and generate latency/safety reports from the native capture fixtures.
 
 Fallback if local backend integration stalls:
 - keep the HTTP adapter boundary stable and use a deterministic fake model server while iterating on the first MLX or llama.cpp shim.

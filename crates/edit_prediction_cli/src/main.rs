@@ -13,6 +13,7 @@ mod headless;
 
 mod load_project;
 mod metrics;
+mod model_adapter;
 mod openai_client;
 mod parse_output;
 mod paths;
@@ -66,6 +67,7 @@ use crate::example::{Example, group_examples_by_repo, read_example_files};
 use crate::filter_languages::{FilterLanguagesArgs, run_filter_languages};
 use crate::format_prompt::run_format_prompt;
 use crate::load_project::run_load_project;
+use crate::model_adapter::{ServeModelAdapterArgs, run_serve_model_adapter};
 use crate::paths::{FAILED_EXAMPLES_DIR, RUN_DIR};
 use crate::predict::run_prediction;
 use crate::progress::Progress;
@@ -253,6 +255,8 @@ enum Command {
     ReplayOutputSafety(ReplayOutputSafetyArgs),
     /// Replay capture fixtures through a local model command
     ReplayModelCommand(ReplayModelCommandArgs),
+    /// Bridge local model HTTP requests to an OpenAI-compatible completions endpoint
+    ServeModelAdapter(ServeModelAdapterArgs),
 }
 
 impl Display for Command {
@@ -315,6 +319,9 @@ impl Display for Command {
             }
             Command::ReplayModelCommand(_) => {
                 write!(f, "replay-model-command")
+            }
+            Command::ServeModelAdapter(_) => {
+                write!(f, "serve-model-adapter")
             }
         }
     }
@@ -1126,6 +1133,19 @@ fn main() {
             });
             return;
         }
+        Command::ServeModelAdapter(adapter_args) => {
+            let adapter_args = adapter_args.clone();
+            let app = gpui_platform::headless();
+            app.run(move |cx| {
+                if let Err(error) =
+                    run_serve_model_adapter(&adapter_args, cx.background_executor().clone())
+                {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            });
+            return;
+        }
 
         Command::Synthesize(synth_args) => {
             let output_dir = if let Some(output_dir) = args.output {
@@ -1378,7 +1398,8 @@ fn main() {
                                         | Command::ImportCaptures(_)
                                         | Command::ReplayCaptures(_)
                                         | Command::ReplayOutputSafety(_)
-                                        | Command::ReplayModelCommand(_) => {
+                                        | Command::ReplayModelCommand(_)
+                                        | Command::ServeModelAdapter(_) => {
                                             unreachable!()
                                         }
                                     }
