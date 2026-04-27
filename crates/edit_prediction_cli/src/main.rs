@@ -1064,10 +1064,14 @@ fn main() {
             return;
         }
         Command::ServeStub(stub_args) => {
-            if let Err(error) = run_serve_stub(stub_args) {
-                eprintln!("{error:#}");
-                std::process::exit(1);
-            }
+            let stub_args = stub_args.clone();
+            let app = gpui_platform::headless();
+            app.run(move |cx| {
+                if let Err(error) = run_serve_stub(&stub_args, cx.background_executor().clone()) {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+            });
             return;
         }
         Command::SummarizeCaptures(summary_args) => {
