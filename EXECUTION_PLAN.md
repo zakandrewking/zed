@@ -26,6 +26,35 @@ It exists to answer four operational questions:
 
 ---
 
+## Current Checkpoint
+
+Last updated: 2026-04-27
+
+Current branch:
+- `local-zeta2-native-routing` on `git@github.com:zakandrewking/zed.git`
+
+Verified artifacts now in place:
+- native local routing hook and capture flow
+- local native stub server with hosted passthrough and local no-op modes
+- imported native capture fixtures under `crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437`
+- capture replay reports for default and all Zeta formats
+- output safety replay command and report
+- raw model-output normalization mode in the local stub
+
+Latest verified commands:
+- `cargo test -p edit_prediction_cli model_output_response -- --nocapture`
+- `cargo test -p edit_prediction_cli capture_ -- --nocapture`
+- `./script/clippy -p edit_prediction_cli`
+- `target/debug/ep replay-output-safety --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/output-safety-report.md`
+
+Immediate next useful milestone:
+- make the stub/shim consume dynamic raw model output from a local backend process instead of only static `--model-output-*` fixtures.
+
+Fallback if local backend integration stalls:
+- add file-watching or stdin-driven raw output mode first, then connect a real model runtime behind that stable boundary.
+
+---
+
 ## Verification Strategy
 
 ### Verification Principles
