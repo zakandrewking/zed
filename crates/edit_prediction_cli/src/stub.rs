@@ -1,3 +1,6 @@
+use crate::capture_safety::{
+    assess_zeta_model_output, expected_editable_range, expected_old_editable_region,
+};
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
 use cloud_llm_client::predict_edits_v3::{PredictEditsV3Request, PredictEditsV3Response};
@@ -28,6 +31,15 @@ pub struct ServeStubArgs {
     /// Apply a unified diff to the request's editable region and return the result.
     #[arg(long)]
     pub diff_file: Option<PathBuf>,
+    /// Parse this raw Zeta model output into a native V3 response.
+    #[arg(long)]
+    pub model_output_text: Option<String>,
+    /// Read raw Zeta model output from a file and parse it into a native V3 response.
+    #[arg(long)]
+    pub model_output_file: Option<PathBuf>,
+    /// Send parsed raw model output even if local safety checks reject it.
+    #[arg(long)]
+    pub allow_unsafe_model_output: bool,
     /// Return the request's editable region unchanged to produce a local no-op response.
     #[arg(long)]
     pub echo_editable_region: bool,
@@ -56,6 +68,8 @@ pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
         args.response_text.is_some(),
         args.response_file.is_some(),
         args.diff_file.is_some(),
+        args.model_output_text.is_some(),
+        args.model_output_file.is_some(),
         args.echo_editable_region,
         args.passthrough_url.is_some(),
     ]
@@ -65,7 +79,7 @@ pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
 
     if configured_response_sources > 1 {
         bail!(
-            "choose at most one of --response-text, --response-file, --diff-file, --echo-editable-region, or --passthrough-url"
+            "choose at most one of --response-text, --response-file, --diff-file, --model-output-text, --model-output-file, --echo-editable-region, or --passthrough-url"
         );
     }
 
@@ -240,6 +254,10 @@ fn build_local_response_payload(
 ) -> Result<ResponsePayload> {
     let parsed_request =
         parsed_request.context("parsed predict-edits request is required for local stub mode")?;
+    if args.model_output_text.is_some() || args.model_output_file.is_some() {
+        return build_model_output_response_payload(args, request_count, parsed_request);
+    }
+
     let editable_range =
         excerpt_range_for_format(Default::default(), &parsed_request.input.excerpt_ranges).1;
     let old_editable = parsed_request.input.cursor_excerpt[editable_range.clone()].to_string();
@@ -264,6 +282,80 @@ fn build_local_response_payload(
         editable_range,
         output,
         model_version: Some("local-stub".to_string()),
+    };
+    let body = serde_json::to_vec(&response).context("failed to serialize stub response")?;
+
+    Ok(ResponsePayload {
+        status_code: 200,
+        headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+        body,
+        parsed_response: Some(response),
+    })
+}
+
+fn build_model_output_response_payload(
+    args: &ServeStubArgs,
+    request_count: u64,
+    parsed_request: &PredictEditsV3Request,
+) -> Result<ResponsePayload> {
+    let raw_output = if let Some(model_output_text) = &args.model_output_text {
+        model_output_text.clone()
+    } else if let Some(model_output_file) = &args.model_output_file {
+        fs::read_to_string(model_output_file).with_context(|| {
+            format!(
+                "failed to read model output file {}",
+                model_output_file.display()
+            )
+        })?
+    } else {
+        String::new()
+    };
+
+    let format = Default::default();
+    let safety = assess_zeta_model_output(
+        &format!("request-{request_count:04}"),
+        "model-output",
+        &raw_output,
+        format,
+        &parsed_request.input,
+    );
+
+    let (editable_range, output, model_version) = if (safety.safe_to_apply
+        || args.allow_unsafe_model_output)
+        && let Some(parsed_output) = safety.parsed_output
+    {
+        (
+            parsed_output.range_in_excerpt,
+            parsed_output.new_editable_region,
+            if safety.safe_to_apply {
+                "local-stub-model-output"
+            } else {
+                "local-stub-model-output-unsafe-allowed"
+            },
+        )
+    } else {
+        eprintln!(
+            "warning: rejected unsafe model output for request #{request_count}: {}",
+            if safety.reasons.is_empty() {
+                "unknown safety failure".to_string()
+            } else {
+                safety.reasons.join("; ")
+            }
+        );
+        (
+            expected_editable_range(format, &parsed_request.input),
+            expected_old_editable_region(format, &parsed_request.input)
+                .unwrap_or_default()
+                .to_string(),
+            "local-stub-model-output-rejected",
+        )
+    };
+
+    let response = PredictEditsV3Response {
+        request_id: format!("stub-request-{request_count}"),
+        editable_range,
+        output,
+        model_version: Some(model_version.to_string()),
     };
     let body = serde_json::to_vec(&response).context("failed to serialize stub response")?;
 
@@ -485,4 +577,137 @@ fn write_request_artifacts(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cloud_llm_client::predict_edits_v3::PredictEditsV3Request;
+    use std::sync::Arc;
+    use zeta_prompt::ExcerptRanges;
+
+    #[test]
+    fn model_output_response_rejects_unsafe_output_to_no_op() {
+        let request = PredictEditsV3Request {
+            input: test_prompt_input(),
+            trigger: Default::default(),
+        };
+        let args = ServeStubArgs {
+            bind: "127.0.0.1:0".to_string(),
+            path: "/predict_edits/v3".to_string(),
+            response_text: None,
+            response_file: None,
+            diff_file: None,
+            model_output_text: Some("<|fim_prefix|>\n<<<<<<< CURRENT\nbad\n".to_string()),
+            model_output_file: None,
+            allow_unsafe_model_output: false,
+            echo_editable_region: false,
+            passthrough_url: None,
+            upstream_bearer_token: None,
+            print_prompt: false,
+            print_json: false,
+            artifact_dir: None,
+            once: false,
+        };
+
+        let response_payload = build_local_response_payload(&args, 1, Some(&request)).unwrap();
+        let response = response_payload.parsed_response.unwrap();
+
+        assert_eq!(
+            response.editable_range,
+            expected_editable_range(Default::default(), &request.input)
+        );
+        assert_eq!(
+            response.output,
+            expected_old_editable_region(Default::default(), &request.input).unwrap()
+        );
+        assert_eq!(
+            response.model_version.as_deref(),
+            Some("local-stub-model-output-rejected")
+        );
+    }
+
+    #[test]
+    fn model_output_response_normalizes_safe_output() {
+        let request = PredictEditsV3Request {
+            input: test_prompt_input(),
+            trigger: Default::default(),
+        };
+        let replacement = format!(
+            "{}\n// added by model\n",
+            expected_old_editable_region(Default::default(), &request.input).unwrap()
+        );
+        let args = ServeStubArgs {
+            bind: "127.0.0.1:0".to_string(),
+            path: "/predict_edits/v3".to_string(),
+            response_text: None,
+            response_file: None,
+            diff_file: None,
+            model_output_text: Some(replacement.clone()),
+            model_output_file: None,
+            allow_unsafe_model_output: false,
+            echo_editable_region: false,
+            passthrough_url: None,
+            upstream_bearer_token: None,
+            print_prompt: false,
+            print_json: false,
+            artifact_dir: None,
+            once: false,
+        };
+
+        let response_payload = build_local_response_payload(&args, 1, Some(&request)).unwrap();
+        let response = response_payload.parsed_response.unwrap();
+
+        assert_eq!(
+            response.editable_range,
+            expected_editable_range(Default::default(), &request.input)
+        );
+        assert_eq!(response.output, replacement);
+        assert_eq!(
+            response.model_version.as_deref(),
+            Some("local-stub-model-output")
+        );
+    }
+
+    fn test_prompt_input() -> zeta_prompt::ZetaPromptInput {
+        let editable = concat!(
+            "fn main() {\n",
+            "    let message = \"hello\";\n",
+            "    println!(\"{}\", message);\n",
+            "}\n",
+            "// This editable range is long enough for deletion safety checks.\n",
+            "// It also keeps the model-output normalization tests realistic.\n",
+            "// The exact contents are not important beyond stable byte ranges.\n",
+        );
+        let suffix = "\nfn helper() {\n    println!(\"helper\");\n}\n";
+        let text = format!("{editable}{suffix}");
+        let editable_end = editable.len();
+
+        zeta_prompt::ZetaPromptInput {
+            cursor_path: Arc::from(Path::new("src/main.rs")),
+            cursor_excerpt: Arc::from(text.as_str()),
+            cursor_offset_in_excerpt: 12,
+            excerpt_start_row: Some(0),
+            events: Vec::new(),
+            related_files: Some(Vec::new()),
+            active_buffer_diagnostics: Vec::new(),
+            excerpt_ranges: ExcerptRanges {
+                editable_150: 0..editable_end,
+                editable_180: 0..editable_end,
+                editable_350: 0..editable_end,
+                editable_512: Some(0..editable_end),
+                editable_150_context_350: 0..text.len(),
+                editable_180_context_350: 0..text.len(),
+                editable_350_context_150: 0..text.len(),
+                editable_350_context_512: Some(0..text.len()),
+                editable_350_context_1024: Some(0..text.len()),
+                context_4096: Some(0..text.len()),
+                context_8192: Some(0..text.len()),
+            },
+            syntax_ranges: None,
+            in_open_source_repo: true,
+            can_collect_data: false,
+            repo_url: None,
+        }
+    }
 }

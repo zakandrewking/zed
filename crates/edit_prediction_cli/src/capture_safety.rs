@@ -23,17 +23,18 @@ pub struct ReplayOutputSafetyArgs {
 }
 
 #[derive(Debug)]
-struct OutputSafetyResult {
-    request_name: String,
-    case_name: String,
-    safe_to_apply: bool,
-    parse_ok: bool,
-    patch_ok: bool,
-    raw_output_bytes: usize,
-    old_editable_bytes: Option<usize>,
-    new_editable_bytes: Option<usize>,
-    deletion_ratio: Option<f64>,
-    reasons: Vec<String>,
+pub(crate) struct OutputSafetyResult {
+    pub(crate) request_name: String,
+    pub(crate) case_name: String,
+    pub(crate) safe_to_apply: bool,
+    pub(crate) parse_ok: bool,
+    pub(crate) patch_ok: bool,
+    pub(crate) parsed_output: Option<ParsedOutput>,
+    pub(crate) raw_output_bytes: usize,
+    pub(crate) old_editable_bytes: Option<usize>,
+    pub(crate) new_editable_bytes: Option<usize>,
+    pub(crate) deletion_ratio: Option<f64>,
+    pub(crate) reasons: Vec<String>,
 }
 
 pub fn run_replay_output_safety(
@@ -57,7 +58,7 @@ pub fn run_replay_output_safety(
         };
 
         if let Some(response) = capture.parsed_response.as_ref() {
-            results.push(assess_output(
+            results.push(assess_zeta_model_output(
                 &capture.name,
                 "captured-response",
                 &response.output,
@@ -68,7 +69,7 @@ pub fn run_replay_output_safety(
 
         if args.include_synthetic {
             for synthetic_case in synthetic_cases(format, &request.input) {
-                results.push(assess_output(
+                results.push(assess_zeta_model_output(
                     &capture.name,
                     synthetic_case.name,
                     &synthetic_case.output,
@@ -121,7 +122,7 @@ fn synthetic_cases(format: ZetaFormat, input: &ZetaPromptInput) -> Vec<Synthetic
     ]
 }
 
-fn assess_output(
+pub(crate) fn assess_zeta_model_output(
     request_name: &str,
     case_name: &str,
     raw_output: &str,
@@ -138,6 +139,7 @@ fn assess_output(
                 safe_to_apply: false,
                 parse_ok: false,
                 patch_ok: false,
+                parsed_output: None,
                 raw_output_bytes: raw_output.len(),
                 old_editable_bytes: None,
                 new_editable_bytes: None,
@@ -196,6 +198,7 @@ fn assess_output(
         safe_to_apply: patch_ok && reasons.is_empty(),
         parse_ok: true,
         patch_ok,
+        parsed_output: Some(parsed),
         raw_output_bytes: raw_output.len(),
         old_editable_bytes,
         new_editable_bytes,
@@ -204,13 +207,16 @@ fn assess_output(
     }
 }
 
-fn expected_editable_range(format: ZetaFormat, input: &ZetaPromptInput) -> Range<usize> {
+pub(crate) fn expected_editable_range(format: ZetaFormat, input: &ZetaPromptInput) -> Range<usize> {
     let (_, editable_range_in_context, context_range, _) = resolve_cursor_region(input, format);
     context_range.start + editable_range_in_context.start
         ..context_range.start + editable_range_in_context.end
 }
 
-fn expected_old_editable_region(format: ZetaFormat, input: &ZetaPromptInput) -> Option<&str> {
+pub(crate) fn expected_old_editable_region(
+    format: ZetaFormat,
+    input: &ZetaPromptInput,
+) -> Option<&str> {
     input
         .cursor_excerpt
         .get(expected_editable_range(format, input))
@@ -389,7 +395,7 @@ mod tests {
     fn flags_sentinel_leaks_and_giant_deletions() {
         let input = test_prompt_input();
 
-        let sentinel = assess_output(
+        let sentinel = assess_zeta_model_output(
             "request-0001",
             "sentinel",
             "<|fim_prefix|>\n<<<<<<< CURRENT\nbad\n>>>>>>> UPDATED\n",
@@ -404,7 +410,7 @@ mod tests {
                 .any(|reason| reason.contains("sentinel leaked"))
         );
 
-        let deletion = assess_output(
+        let deletion = assess_zeta_model_output(
             "request-0001",
             "giant-deletion",
             "",
