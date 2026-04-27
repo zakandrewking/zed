@@ -1,5 +1,6 @@
 mod anthropic_client;
 mod capture_import;
+mod capture_model_replay;
 mod capture_replay;
 mod capture_safety;
 mod capture_summary;
@@ -56,6 +57,7 @@ use std::sync::Mutex;
 use std::{path::PathBuf, sync::Arc};
 
 use crate::capture_import::{ImportCapturesArgs, run_import_captures};
+use crate::capture_model_replay::{ReplayModelCommandArgs, run_replay_model_command};
 use crate::capture_replay::{ReplayCapturesArgs, run_replay_captures};
 use crate::capture_safety::{ReplayOutputSafetyArgs, run_replay_output_safety};
 use crate::capture_summary::{SummarizeCapturesArgs, run_summarize_captures};
@@ -249,6 +251,8 @@ enum Command {
     ReplayCaptures(ReplayCapturesArgs),
     /// Replay captured and synthetic outputs through output safety checks
     ReplayOutputSafety(ReplayOutputSafetyArgs),
+    /// Replay capture fixtures through a local model command
+    ReplayModelCommand(ReplayModelCommandArgs),
 }
 
 impl Display for Command {
@@ -308,6 +312,9 @@ impl Display for Command {
             }
             Command::ReplayOutputSafety(_) => {
                 write!(f, "replay-output-safety")
+            }
+            Command::ReplayModelCommand(_) => {
+                write!(f, "replay-model-command")
             }
         }
     }
@@ -1102,6 +1109,23 @@ fn main() {
             }
             return;
         }
+        Command::ReplayModelCommand(replay_args) => {
+            let replay_args = replay_args.clone();
+            let output = args.output.clone();
+            let app = gpui_platform::headless();
+            app.run(move |cx| {
+                if let Err(error) = run_replay_model_command(
+                    &replay_args,
+                    output.as_ref(),
+                    cx.background_executor().clone(),
+                ) {
+                    eprintln!("{error:#}");
+                    std::process::exit(1);
+                }
+                cx.quit();
+            });
+            return;
+        }
 
         Command::Synthesize(synth_args) => {
             let output_dir = if let Some(output_dir) = args.output {
@@ -1353,7 +1377,8 @@ fn main() {
                                         | Command::SummarizeCaptures(_)
                                         | Command::ImportCaptures(_)
                                         | Command::ReplayCaptures(_)
-                                        | Command::ReplayOutputSafety(_) => {
+                                        | Command::ReplayOutputSafety(_)
+                                        | Command::ReplayModelCommand(_) => {
                                             unreachable!()
                                         }
                                     }

@@ -78,6 +78,14 @@ pub struct ServeStubArgs {
     pub once: bool,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ModelCommandConfig {
+    pub(crate) command: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) input: ModelCommandInput,
+    pub(crate) timeout_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 pub enum ModelCommandInput {
     /// Send the formatted default Zeta prompt on stdin.
@@ -430,52 +438,50 @@ fn read_raw_model_output(
     }
 
     if args.model_command.is_some() {
-        return run_model_command(args, request, background_executor);
+        let config = ModelCommandConfig {
+            command: args.model_command.clone().expect("checked is_some"),
+            args: args.model_command_args.clone(),
+            input: args.model_command_input,
+            timeout_ms: args.model_command_timeout_ms,
+        };
+        return run_model_command(&config, request, background_executor);
     }
 
     Ok(String::new())
 }
 
-fn run_model_command(
-    args: &ServeStubArgs,
+pub(crate) fn run_model_command(
+    config: &ModelCommandConfig,
     request: &PredictEditsV3Request,
     background_executor: &BackgroundExecutor,
 ) -> Result<String> {
-    let input = match args.model_command_input {
+    let input = match config.input {
         ModelCommandInput::Prompt => format_zeta_prompt(&request.input, Default::default())
             .context("failed to format prompt for model command")?,
         ModelCommandInput::RequestJson => serde_json::to_string(request)
             .context("failed to serialize request for model command")?,
     };
-    let timeout = Duration::from_millis(args.model_command_timeout_ms);
+    let timeout = Duration::from_millis(config.timeout_ms);
 
     smol::block_on(async {
-        let command = run_model_command_inner(args, &input).fuse();
+        let command = run_model_command_inner(config, &input).fuse();
         let timeout = background_executor.timer(timeout).fuse();
         pin_mut!(command, timeout);
 
         select! {
             result = command => result,
             _ = timeout => {
-                let command = args
-                    .model_command
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "model command".to_string());
-                bail!("{command} timed out after {} ms", args.model_command_timeout_ms)
+                bail!("{} timed out after {} ms", config.command.display(), config.timeout_ms)
             }
         }
     })
 }
 
-async fn run_model_command_inner(args: &ServeStubArgs, input: &str) -> Result<String> {
-    let command_path = args
-        .model_command
-        .as_ref()
-        .context("--model-command is required")?;
+async fn run_model_command_inner(config: &ModelCommandConfig, input: &str) -> Result<String> {
+    let command_path = &config.command;
     let mut child = KillOnDropChild::new(
         smol::process::Command::new(command_path)
-            .args(&args.model_command_args)
+            .args(&config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
