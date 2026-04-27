@@ -9,6 +9,9 @@ bind="127.0.0.1:3000"
 artifact_dir=""
 passthrough_url="${ZED_PREDICT_CAPTURE_PASSTHROUGH_URL:-https://cloud.zed.dev/predict_edits/v3}"
 upstream_bearer_token="${ZED_PREDICT_CAPTURE_BEARER_TOKEN:-}"
+model_http_url=""
+model_http_input="request-json"
+model_http_timeout_ms="30000"
 offline_mode=0
 user_data_dir=""
 build_binaries=1
@@ -36,6 +39,12 @@ Options:
                              has no Authorization header.
   --offline                  Do not call hosted at all. Return the editable region unchanged
                              so native predict-edits requests complete locally without auth.
+  --model-http-url <url>     Send native requests through a local model HTTP backend instead
+                             of hosted passthrough or offline no-op mode.
+  --model-http-input <mode>  Input sent to the model HTTP backend: prompt or request-json.
+                             Default: request-json
+  --model-http-timeout-ms <n>
+                             Timeout for local model HTTP calls. Default: 30000
   --user-data-dir <dir>      Pass a custom Zed user data dir.
   --zed-binary <path>        Override the Zed binary path.
   --ep-binary <path>         Override the ep CLI binary path.
@@ -48,6 +57,7 @@ Examples:
   script/capture-predict-edits
   ZED_PREDICT_CAPTURE_BEARER_TOKEN=... script/capture-predict-edits
   script/capture-predict-edits --offline
+  script/capture-predict-edits --model-http-url http://127.0.0.1:3297/predict
   script/capture-predict-edits -- --foreground
   script/capture-predict-edits --artifact-dir /tmp/zed-captures -- my/project
 EOF
@@ -77,6 +87,18 @@ while [[ $# -gt 0 ]]; do
     --offline)
       offline_mode=1
       shift
+      ;;
+    --model-http-url)
+      model_http_url="$2"
+      shift 2
+      ;;
+    --model-http-input)
+      model_http_input="$2"
+      shift 2
+      ;;
+    --model-http-timeout-ms)
+      model_http_timeout_ms="$2"
+      shift 2
       ;;
     --user-data-dir)
       user_data_dir="$2"
@@ -151,6 +173,11 @@ if [[ "$build_binaries" -eq 1 ]]; then
   )
 fi
 
+if [[ "$offline_mode" -eq 1 && -n "$model_http_url" ]]; then
+  echo "--offline cannot be combined with --model-http-url" >&2
+  exit 1
+fi
+
 if [[ ! -x "$ep_binary" ]]; then
   echo "ep binary not found at $ep_binary" >&2
   exit 1
@@ -194,10 +221,14 @@ echo "Artifact dir: $artifact_dir"
 echo "Stub URL: $stub_url"
 if [[ "$offline_mode" -eq 1 ]]; then
   echo "Mode: offline local no-op responses"
+elif [[ -n "$model_http_url" ]]; then
+  echo "Mode: local model HTTP backend"
+  echo "Model HTTP URL: $model_http_url"
+  echo "Model HTTP input: $model_http_input"
 else
   echo "Passthrough URL: $passthrough_url"
 fi
-if [[ "$offline_mode" -eq 0 && -n "$upstream_bearer_token" ]]; then
+if [[ "$offline_mode" -eq 0 && -z "$model_http_url" && -n "$upstream_bearer_token" ]]; then
   echo "Upstream bearer token: configured"
 fi
 
@@ -212,13 +243,19 @@ stub_command=(
   --artifact-dir "$artifact_dir"
 )
 
-if [[ "$offline_mode" -eq 1 ]]; then
+if [[ -n "$model_http_url" ]]; then
+  stub_command+=(
+    --model-http-url "$model_http_url"
+    --model-http-input "$model_http_input"
+    --model-http-timeout-ms "$model_http_timeout_ms"
+  )
+elif [[ "$offline_mode" -eq 1 ]]; then
   stub_command+=(--echo-editable-region)
 else
   stub_command+=(--passthrough-url "$passthrough_url")
 fi
 
-if [[ "$offline_mode" -eq 0 && -n "$upstream_bearer_token" ]]; then
+if [[ "$offline_mode" -eq 0 && -z "$model_http_url" && -n "$upstream_bearer_token" ]]; then
   stub_command+=(--upstream-bearer-token "$upstream_bearer_token")
 fi
 

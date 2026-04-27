@@ -46,8 +46,16 @@ Verified artifacts now in place:
 - offline HTTP model backend replay for capture fixtures with latency and safety reporting
 - local OpenAI-compatible model adapter that bridges native Zeta prompts to a `/v1/completions`-style endpoint
 - model adapter replay report proving the adapter boundary works over the native capture fixtures
+- llama.cpp installed locally and `script/run-local-zeta2-llama` added to launch llama-server plus the model adapter
+- `script/capture-predict-edits` can now route the native stub to `--model-http-url` for full local editor smoke tests
+- Zeta2 Q4_K_M GGUF is cached in llama.cpp and the real local stack reached a listening `/v1/completions` server
 
 Latest verified commands:
+- `bash -n script/run-local-zeta2-llama`
+- `bash -n script/capture-predict-edits`
+- `script/run-local-zeta2-llama --help`
+- `script/capture-predict-edits --help`
+- `llama-server --cache-list`
 - `cargo test -p edit_prediction_cli model_adapter -- --nocapture`
 - `cargo test -p edit_prediction_cli model_command -- --nocapture`
 - `cargo test -p edit_prediction_cli model_http -- --nocapture`
@@ -59,12 +67,16 @@ Latest verified commands:
 - live smoke: `ep serve-stub --model-command /bin/sh --model-command-arg=-c --model-command-arg 'sleep 2' --model-command-timeout-ms 10 --once` rejected a captured request with `/bin/sh timed out after 10 ms`
 - live smoke: `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-http-url http://127.0.0.1:3297/predict --model-http-input request-json -o crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437/model-http-replay-report.md` produced 13/13 backend successes and 13/13 safe outputs against a local HTTP adapter
 - live smoke: `target/debug/ep serve-model-adapter --bind 127.0.0.1:3297 --path /predict --completions-url http://127.0.0.1:3298/v1/completions --max-tokens 256` plus replay through `--model-http-url http://127.0.0.1:3297/predict` produced 13/13 backend successes and 13/13 safe outputs against a fake OpenAI-compatible completions server
+- real local stack: `script/run-local-zeta2-llama --no-build --log-dir /tmp/zed-local-zeta2-real` downloaded/cached `bartowski/zed-industries_zeta-2-GGUF:Q4_K_M`, loaded it on Metal, and started `llama-server` on `127.0.0.1:8080`
+
+Current verification blocker:
+- Real replay through the local Q4 stack still needs an unsandboxed run. The sandboxed `target/debug/ep replay-model-command ... --model-http-url http://127.0.0.1:3297/predict` panicked in macOS `system-configuration` initialization, and the required unsandboxed rerun was rejected by the environment's usage-limit policy.
 
 Immediate next useful milestone:
-- connect a real local inference server behind `ep serve-model-adapter` and generate latency/safety reports from the native capture fixtures.
+- run the real local Q4 replay outside the sandbox and commit the resulting latency/safety report.
 
 Fallback if local backend integration stalls:
-- keep the HTTP adapter boundary stable and use a deterministic fake model server while iterating on the first MLX or llama.cpp shim.
+- if the Q4 replay is too slow or unstable, run the same launcher with a smaller GGUF file such as `zed-industries_zeta-2-Q3_K_M.gguf` and compare reports.
 
 ---
 

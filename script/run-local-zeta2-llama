@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+
+hf_repo="${ZETA2_LLAMA_HF_REPO:-bartowski/zed-industries_zeta-2-GGUF}"
+hf_file="${ZETA2_LLAMA_HF_FILE:-zed-industries_zeta-2-Q4_K_M.gguf}"
+llama_host="127.0.0.1"
+llama_port="8080"
+adapter_bind="127.0.0.1:3297"
+adapter_path="/predict"
+model_alias="local-zeta2"
+ctx_size="8192"
+max_tokens="256"
+temperature="0"
+top_p="1"
+timeout_ms="120000"
+build_ep=1
+release_mode=0
+log_dir=""
+
+print_help() {
+  cat <<'EOF'
+Usage:
+  script/run-local-zeta2-llama [options]
+
+Starts a local llama.cpp server for Zeta2 GGUF and an ep model adapter that
+bridges native Zeta prompts to llama.cpp's OpenAI-compatible completions API.
+
+Defaults target the Q4_K_M GGUF quantization from bartowski/zed-industries_zeta-2-GGUF.
+
+Options:
+  --hf-repo <repo[:quant]>    Hugging Face GGUF repo. Default: bartowski/zed-industries_zeta-2-GGUF
+  --hf-file <file>            Specific GGUF file in the repo. Default: zed-industries_zeta-2-Q4_K_M.gguf
+  --llama-host <host>         llama-server host. Default: 127.0.0.1
+  --llama-port <port>         llama-server port. Default: 8080
+  --adapter-bind <host:port>  ep adapter bind address. Default: 127.0.0.1:3297
+  --adapter-path <path>       ep adapter path. Default: /predict
+  --ctx-size <n>              llama.cpp context size. Default: 8192
+  --max-tokens <n>            Maximum generated tokens. Default: 256
+  --temperature <n>           Sampling temperature. Default: 0
+  --top-p <n>                 Sampling top-p. Default: 1
+  --timeout-ms <n>            Adapter upstream timeout. Default: 120000
+  --log-dir <dir>             Directory for server logs. Default: /tmp/zed-local-zeta2-<timestamp>
+  --release                   Build/use target/release/ep.
+  --no-build                  Reuse existing ep binary.
+  --help                      Print this help text.
+
+After this is running, launch Zed through:
+
+  script/capture-predict-edits --model-http-url http://127.0.0.1:3297/predict --model-http-input request-json
+
+Or replay fixtures through:
+
+  target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-http-url http://127.0.0.1:3297/predict --model-http-input request-json
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hf-repo)
+      hf_repo="$2"
+      shift 2
+      ;;
+    --hf-file)
+      hf_file="$2"
+      shift 2
+      ;;
+    --llama-host)
+      llama_host="$2"
+      shift 2
+      ;;
+    --llama-port)
+      llama_port="$2"
+      shift 2
+      ;;
+    --adapter-bind)
+      adapter_bind="$2"
+      shift 2
+      ;;
+    --adapter-path)
+      adapter_path="$2"
+      shift 2
+      ;;
+    --ctx-size)
+      ctx_size="$2"
+      shift 2
+      ;;
+    --max-tokens)
+      max_tokens="$2"
+      shift 2
+      ;;
+    --temperature)
+      temperature="$2"
+      shift 2
+      ;;
+    --top-p)
+      top_p="$2"
+      shift 2
+      ;;
+    --timeout-ms)
+      timeout_ms="$2"
+      shift 2
+      ;;
+    --log-dir)
+      log_dir="$2"
+      shift 2
+      ;;
+    --release)
+      release_mode=1
+      shift
+      ;;
+    --no-build)
+      build_ep=0
+      shift
+      ;;
+    --help)
+      print_help
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      print_help >&2
+      exit 1
+      ;;
+  esac
+done
+
+if ! command -v llama-server >/dev/null 2>&1; then
+  echo "llama-server not found. Install it with: brew install llama.cpp" >&2
+  exit 1
+fi
+
+profile_dir="debug"
+if [[ "$release_mode" -eq 1 ]]; then
+  profile_dir="release"
+fi
+ep_binary="$repo_root/target/$profile_dir/ep"
+
+if [[ "$build_ep" -eq 1 ]]; then
+  cargo_args=(build -p edit_prediction_cli --bin ep)
+  if [[ "$release_mode" -eq 1 ]]; then
+    cargo_args+=(--release)
+  fi
+
+  (
+    cd "$repo_root"
+    export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:$PATH"
+    cargo "${cargo_args[@]}"
+  )
+fi
+
+if [[ ! -x "$ep_binary" ]]; then
+  echo "ep binary not found at $ep_binary" >&2
+  exit 1
+fi
+
+timestamp="$(date +%Y%m%d-%H%M%S)"
+if [[ -z "$log_dir" ]]; then
+  log_dir="/tmp/zed-local-zeta2-$timestamp"
+fi
+mkdir -p "$log_dir"
+
+llama_url="http://$llama_host:$llama_port"
+adapter_url="http://$adapter_bind$adapter_path"
+
+cleanup() {
+  if [[ -n "${adapter_pid:-}" ]]; then
+    kill "$adapter_pid" >/dev/null 2>&1 || true
+    wait "$adapter_pid" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${llama_pid:-}" ]]; then
+    kill "$llama_pid" >/dev/null 2>&1 || true
+    wait "$llama_pid" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup EXIT INT TERM
+
+llama_command=(
+  llama-server
+  --hf-repo "$hf_repo"
+  --host "$llama_host"
+  --port "$llama_port"
+  --ctx-size "$ctx_size"
+  --predict "$max_tokens"
+  --temp "$temperature"
+  --top-p "$top_p"
+  --alias "$model_alias"
+  --no-webui
+)
+
+if [[ -n "$hf_file" ]]; then
+  llama_command+=(--hf-file "$hf_file")
+fi
+
+echo "Starting llama-server for $hf_repo"
+echo "llama-server log: $log_dir/llama-server.log"
+"${llama_command[@]}" >"$log_dir/llama-server.log" 2>&1 &
+llama_pid=$!
+
+echo "Waiting for llama-server at $llama_url/v1/models"
+for _ in {1..180}; do
+  if ! kill -0 "$llama_pid" >/dev/null 2>&1; then
+    echo "llama-server exited early. Last log lines:" >&2
+    tail -n 80 "$log_dir/llama-server.log" >&2 || true
+    exit 1
+  fi
+  if curl -fsS "$llama_url/v1/models" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+if ! curl -fsS "$llama_url/v1/models" >/dev/null 2>&1; then
+  echo "llama-server did not become ready. Last log lines:" >&2
+  tail -n 80 "$log_dir/llama-server.log" >&2 || true
+  exit 1
+fi
+
+adapter_command=(
+  "$ep_binary" serve-model-adapter
+  --bind "$adapter_bind"
+  --path "$adapter_path"
+  --completions-url "$llama_url/v1/completions"
+  --model "$model_alias"
+  --max-tokens "$max_tokens"
+  --temperature "$temperature"
+  --top-p "$top_p"
+  --stop ">>>>>>> UPDATED"
+  --timeout-ms "$timeout_ms"
+)
+
+echo "Starting model adapter at $adapter_url"
+echo "model adapter log: $log_dir/model-adapter.log"
+"${adapter_command[@]}" >"$log_dir/model-adapter.log" 2>&1 &
+adapter_pid=$!
+
+sleep 1
+if ! kill -0 "$adapter_pid" >/dev/null 2>&1; then
+  echo "model adapter exited early. Last log lines:" >&2
+  tail -n 80 "$log_dir/model-adapter.log" >&2 || true
+  exit 1
+fi
+
+cat <<EOF
+Local Zeta2 stack is running.
+
+Adapter URL:
+  $adapter_url
+
+Run replay:
+  $ep_binary replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-http-url $adapter_url --model-http-input request-json
+
+Launch Zed through the native local stub:
+  script/capture-predict-edits --model-http-url $adapter_url --model-http-input request-json
+
+Press Ctrl-C to stop llama-server and the adapter.
+EOF
+
+while true; do
+  if ! kill -0 "$llama_pid" >/dev/null 2>&1; then
+    echo "llama-server exited. Last log lines:" >&2
+    tail -n 80 "$log_dir/llama-server.log" >&2 || true
+    exit 1
+  fi
+  if ! kill -0 "$adapter_pid" >/dev/null 2>&1; then
+    echo "model adapter exited. Last log lines:" >&2
+    tail -n 80 "$log_dir/model-adapter.log" >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
