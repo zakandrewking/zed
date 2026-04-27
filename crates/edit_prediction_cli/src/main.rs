@@ -1,6 +1,7 @@
 mod anthropic_client;
 mod capture_import;
 mod capture_replay;
+mod capture_safety;
 mod capture_summary;
 mod distill;
 mod example;
@@ -56,6 +57,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use crate::capture_import::{ImportCapturesArgs, run_import_captures};
 use crate::capture_replay::{ReplayCapturesArgs, run_replay_captures};
+use crate::capture_safety::{ReplayOutputSafetyArgs, run_replay_output_safety};
 use crate::capture_summary::{SummarizeCapturesArgs, run_summarize_captures};
 use crate::distill::run_distill;
 use crate::example::{Example, group_examples_by_repo, read_example_files};
@@ -245,6 +247,8 @@ enum Command {
     ImportCaptures(ImportCapturesArgs),
     /// Replay imported capture fixtures against the current prompt/output code
     ReplayCaptures(ReplayCapturesArgs),
+    /// Replay captured and synthetic outputs through output safety checks
+    ReplayOutputSafety(ReplayOutputSafetyArgs),
 }
 
 impl Display for Command {
@@ -301,6 +305,9 @@ impl Display for Command {
             }
             Command::ReplayCaptures(_) => {
                 write!(f, "replay-captures")
+            }
+            Command::ReplayOutputSafety(_) => {
+                write!(f, "replay-output-safety")
             }
         }
     }
@@ -1084,6 +1091,13 @@ fn main() {
             }
             return;
         }
+        Command::ReplayOutputSafety(safety_args) => {
+            if let Err(error) = run_replay_output_safety(safety_args, args.output.as_ref()) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
 
         Command::Synthesize(synth_args) => {
             let output_dir = if let Some(output_dir) = args.output {
@@ -1334,7 +1348,8 @@ fn main() {
                                         | Command::ServeStub(_)
                                         | Command::SummarizeCaptures(_)
                                         | Command::ImportCaptures(_)
-                                        | Command::ReplayCaptures(_) => {
+                                        | Command::ReplayCaptures(_)
+                                        | Command::ReplayOutputSafety(_) => {
                                             unreachable!()
                                         }
                                     }

@@ -5,9 +5,9 @@ use clap::Args;
 use cloud_llm_client::predict_edits_v3::PREDICT_EDITS_MODE_HEADER_NAME;
 use edit_prediction::example_spec::ExampleSpec;
 use serde::Serialize;
+use smol::process::Command;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use zeta_prompt::Event;
 
 #[derive(Debug, Args, Clone)]
@@ -211,9 +211,7 @@ fn resolve_revision(explicit_revision: Option<String>) -> Result<String> {
 }
 
 fn run_git_command(args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
+    let output = smol::block_on(Command::new("git").args(args).output())
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
