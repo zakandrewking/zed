@@ -5,7 +5,6 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use clap::{Args, ValueEnum};
 use cloud_llm_client::predict_edits_v3::{PredictEditsV3Request, PredictEditsV3Response};
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, pin_mut, select};
-use gpui::BackgroundExecutor;
 use http_client::{AsyncBody, HttpClient as _, Method as HttpMethod};
 use reqwest_client::ReqwestClient;
 use serde::{Deserialize, Serialize};
@@ -121,7 +120,7 @@ impl std::fmt::Display for ModelCommandInput {
     }
 }
 
-pub fn run_serve_stub(args: &ServeStubArgs, background_executor: BackgroundExecutor) -> Result<()> {
+pub fn run_serve_stub(args: &ServeStubArgs) -> Result<()> {
     let configured_response_sources = [
         args.response_text.is_some(),
         args.response_file.is_some(),
@@ -257,12 +256,7 @@ pub fn run_serve_stub(args: &ServeStubArgs, background_executor: BackgroundExecu
                 args.upstream_bearer_token.as_deref(),
             )?
         } else {
-            build_local_response_payload(
-                args,
-                request_count,
-                parsed_request.as_ref(),
-                &background_executor,
-            )?
+            build_local_response_payload(args, request_count, parsed_request.as_ref())?
         };
 
         if let Some(artifact_dir) = &args.artifact_dir {
@@ -325,7 +319,6 @@ fn build_local_response_payload(
     args: &ServeStubArgs,
     request_count: u64,
     parsed_request: Option<&PredictEditsV3Request>,
-    background_executor: &BackgroundExecutor,
 ) -> Result<ResponsePayload> {
     let parsed_request =
         parsed_request.context("parsed predict-edits request is required for local stub mode")?;
@@ -334,12 +327,7 @@ fn build_local_response_payload(
         || args.model_command.is_some()
         || args.model_http_url.is_some()
     {
-        return build_model_output_response_payload(
-            args,
-            request_count,
-            parsed_request,
-            background_executor,
-        );
+        return build_model_output_response_payload(args, request_count, parsed_request);
     }
 
     let editable_range =
@@ -381,9 +369,8 @@ fn build_model_output_response_payload(
     args: &ServeStubArgs,
     request_count: u64,
     parsed_request: &PredictEditsV3Request,
-    background_executor: &BackgroundExecutor,
 ) -> Result<ResponsePayload> {
-    let raw_output = read_raw_model_output(args, parsed_request, background_executor)?;
+    let raw_output = read_raw_model_output(args, parsed_request)?;
 
     let format = Default::default();
     let safety = assess_zeta_model_output(
@@ -441,11 +428,7 @@ fn build_model_output_response_payload(
     })
 }
 
-fn read_raw_model_output(
-    args: &ServeStubArgs,
-    request: &PredictEditsV3Request,
-    background_executor: &BackgroundExecutor,
-) -> Result<String> {
+fn read_raw_model_output(args: &ServeStubArgs, request: &PredictEditsV3Request) -> Result<String> {
     if let Some(model_output_text) = &args.model_output_text {
         return Ok(model_output_text.clone());
     }
@@ -466,7 +449,7 @@ fn read_raw_model_output(
             input: args.model_command_input,
             timeout_ms: args.model_command_timeout_ms,
         };
-        return run_model_command(&config, request, background_executor);
+        return run_model_command(&config, request);
     }
 
     if let Some(model_http_url) = &args.model_http_url {
@@ -475,7 +458,7 @@ fn read_raw_model_output(
             input: args.model_http_input,
             timeout_ms: args.model_http_timeout_ms,
         };
-        return run_model_http(&config, request, background_executor);
+        return run_model_http(&config, request);
     }
 
     Ok(String::new())
@@ -484,7 +467,6 @@ fn read_raw_model_output(
 pub(crate) fn run_model_http(
     config: &ModelHttpConfig,
     request: &PredictEditsV3Request,
-    background_executor: &BackgroundExecutor,
 ) -> Result<String> {
     let body = model_http_request_body(config.input, request)?;
     let timeout = Duration::from_millis(config.timeout_ms);
@@ -498,7 +480,11 @@ pub(crate) fn run_model_http(
             .body(AsyncBody::from(body))
             .context("failed to build model HTTP request")?;
         let send = http_client.send(request).fuse();
-        let timeout = background_executor.timer(timeout).fuse();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "CLI replay/stub commands intentionally avoid constructing a GPUI app"
+        )]
+        let timeout = smol::Timer::after(timeout).fuse();
         pin_mut!(send, timeout);
 
         let mut response = select! {
@@ -574,7 +560,6 @@ fn parse_model_http_response_body(body: &[u8]) -> Result<String> {
 pub(crate) fn run_model_command(
     config: &ModelCommandConfig,
     request: &PredictEditsV3Request,
-    background_executor: &BackgroundExecutor,
 ) -> Result<String> {
     let input = match config.input {
         ModelCommandInput::Prompt => format_zeta_prompt(&request.input, Default::default())
@@ -586,7 +571,11 @@ pub(crate) fn run_model_command(
 
     smol::block_on(async {
         let command = run_model_command_inner(config, &input).fuse();
-        let timeout = background_executor.timer(timeout).fuse();
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "CLI replay/stub commands intentionally avoid constructing a GPUI app"
+        )]
+        let timeout = smol::Timer::after(timeout).fuse();
         pin_mut!(command, timeout);
 
         select! {
@@ -915,13 +904,12 @@ mod tests {
     use std::sync::Arc;
     use zeta_prompt::ExcerptRanges;
 
-    #[gpui::test]
-    async fn model_output_response_rejects_unsafe_output_to_no_op(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn model_output_response_rejects_unsafe_output_to_no_op() {
         let request = PredictEditsV3Request {
             input: test_prompt_input(),
             trigger: Default::default(),
         };
-        let executor = cx.executor();
         let args = ServeStubArgs {
             bind: "127.0.0.1:0".to_string(),
             path: "/predict_edits/v3".to_string(),
@@ -947,8 +935,7 @@ mod tests {
             once: false,
         };
 
-        let response_payload =
-            build_local_response_payload(&args, 1, Some(&request), &executor).unwrap();
+        let response_payload = build_local_response_payload(&args, 1, Some(&request)).unwrap();
         let response = response_payload.parsed_response.unwrap();
 
         assert_eq!(
@@ -965,13 +952,12 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn model_output_response_normalizes_safe_output(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn model_output_response_normalizes_safe_output() {
         let request = PredictEditsV3Request {
             input: test_prompt_input(),
             trigger: Default::default(),
         };
-        let executor = cx.executor();
         let replacement = format!(
             "{}\n// added by model\n",
             expected_old_editable_region(Default::default(), &request.input).unwrap()
@@ -1001,8 +987,7 @@ mod tests {
             once: false,
         };
 
-        let response_payload =
-            build_local_response_payload(&args, 1, Some(&request), &executor).unwrap();
+        let response_payload = build_local_response_payload(&args, 1, Some(&request)).unwrap();
         let response = response_payload.parsed_response.unwrap();
 
         assert_eq!(
@@ -1016,13 +1001,12 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    async fn model_command_stdout_is_normalized_as_model_output(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn model_command_stdout_is_normalized_as_model_output() {
         let request = PredictEditsV3Request {
             input: test_prompt_input(),
             trigger: Default::default(),
         };
-        let executor = cx.executor();
         let replacement = format!(
             "{}\n// generated by command\n",
             expected_old_editable_region(Default::default(), &request.input).unwrap()
@@ -1061,8 +1045,7 @@ mod tests {
             once: false,
         };
 
-        let response_payload =
-            build_local_response_payload(&args, 1, Some(&request), &executor).unwrap();
+        let response_payload = build_local_response_payload(&args, 1, Some(&request)).unwrap();
         let response = response_payload.parsed_response.unwrap();
 
         assert_eq!(

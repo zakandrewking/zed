@@ -5,7 +5,6 @@ use crate::stub::{
 };
 use anyhow::{Context as _, Result};
 use clap::Args;
-use gpui::BackgroundExecutor;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -55,7 +54,6 @@ struct ModelReplayResult {
 pub fn run_replay_model_command(
     args: &ReplayModelCommandArgs,
     output_path: Option<&PathBuf>,
-    background_executor: BackgroundExecutor,
 ) -> Result<()> {
     if args.model_command_timeout_ms == 0 {
         anyhow::bail!("--model-command-timeout-ms must be greater than zero");
@@ -98,7 +96,7 @@ pub fn run_replay_model_command(
         };
 
         let started_at = Instant::now();
-        match backend.run(request, &background_executor) {
+        match backend.run(request) {
             Ok(raw_output) => {
                 let latency_ms = started_at.elapsed().as_millis();
                 let safety = assess_zeta_model_output(
@@ -171,11 +169,10 @@ impl ModelReplayBackend {
     fn run(
         &self,
         request: &cloud_llm_client::predict_edits_v3::PredictEditsV3Request,
-        background_executor: &BackgroundExecutor,
     ) -> Result<String> {
         match self {
-            Self::Command(config) => run_model_command(config, request, background_executor),
-            Self::Http(config) => run_model_http(config, request, background_executor),
+            Self::Command(config) => run_model_command(config, request),
+            Self::Http(config) => run_model_http(config, request),
         }
     }
 }
@@ -350,8 +347,8 @@ mod tests {
     use tempfile::tempdir;
     use zeta_prompt::ExcerptRanges;
 
-    #[gpui::test]
-    async fn replays_model_command_against_capture_fixtures(cx: &mut gpui::TestAppContext) {
+    #[test]
+    fn replays_model_command_against_capture_fixtures() {
         let directory = tempdir().unwrap();
         let request_dir = directory.path().join("request-0001");
         std::fs::create_dir_all(&request_dir).unwrap();
@@ -390,7 +387,7 @@ mod tests {
         };
         let output_path = directory.path().join("model-replay.md");
 
-        run_replay_model_command(&args, Some(&output_path), cx.executor()).unwrap();
+        run_replay_model_command(&args, Some(&output_path)).unwrap();
 
         let report = std::fs::read_to_string(output_path).unwrap();
         assert!(report.contains("- Requests: `1`"));

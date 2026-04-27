@@ -1078,14 +1078,10 @@ fn main() {
             return;
         }
         Command::ServeStub(stub_args) => {
-            let stub_args = stub_args.clone();
-            let app = gpui_platform::headless();
-            app.run(move |cx| {
-                if let Err(error) = run_serve_stub(&stub_args, cx.background_executor().clone()) {
-                    eprintln!("{error:#}");
-                    std::process::exit(1);
-                }
-            });
+            if let Err(error) = run_serve_stub(stub_args) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
             return;
         }
         Command::SummarizeCaptures(summary_args) => {
@@ -1117,20 +1113,10 @@ fn main() {
             return;
         }
         Command::ReplayModelCommand(replay_args) => {
-            let replay_args = replay_args.clone();
-            let output = args.output.clone();
-            let app = gpui_platform::headless();
-            app.run(move |cx| {
-                if let Err(error) = run_replay_model_command(
-                    &replay_args,
-                    output.as_ref(),
-                    cx.background_executor().clone(),
-                ) {
-                    eprintln!("{error:#}");
-                    std::process::exit(1);
-                }
-                cx.quit();
-            });
+            if let Err(error) = run_replay_model_command(replay_args, args.output.as_ref()) {
+                eprintln!("{error:#}");
+                std::process::exit(1);
+            }
             return;
         }
         Command::ServeModelAdapter(adapter_args) => {

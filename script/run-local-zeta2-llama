@@ -17,6 +17,7 @@ max_tokens="256"
 temperature="0"
 top_p="1"
 timeout_ms="120000"
+offline_mode=0
 build_ep=1
 release_mode=0
 log_dir=""
@@ -43,6 +44,7 @@ Options:
   --temperature <n>           Sampling temperature. Default: 0
   --top-p <n>                 Sampling top-p. Default: 1
   --timeout-ms <n>            Adapter upstream timeout. Default: 120000
+  --offline                   Start llama.cpp in offline mode using its local model cache.
   --log-dir <dir>             Directory for server logs. Default: /tmp/zed-local-zeta2-<timestamp>
   --release                   Build/use target/release/ep.
   --no-build                  Reuse existing ep binary.
@@ -103,6 +105,10 @@ while [[ $# -gt 0 ]]; do
     --timeout-ms)
       timeout_ms="$2"
       shift 2
+      ;;
+    --offline)
+      offline_mode=1
+      shift
       ;;
     --log-dir)
       log_dir="$2"
@@ -194,6 +200,10 @@ llama_command=(
 
 if [[ -n "$hf_file" ]]; then
   llama_command+=(--hf-file "$hf_file")
+fi
+
+if [[ "$offline_mode" -eq 1 ]]; then
+  llama_command+=(--offline)
 fi
 
 echo "Starting llama-server for $hf_repo"

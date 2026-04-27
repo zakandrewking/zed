@@ -56,6 +56,7 @@ Latest verified commands:
 - `script/run-local-zeta2-llama --help`
 - `script/capture-predict-edits --help`
 - `llama-server --cache-list`
+- `target/debug/ep replay-model-command --directory crates/edit_prediction_cli/evals-generated/native-captures/20260421-111437 --model-command /usr/bin/ruby --model-command-arg=-rjson --model-command-arg=-e --model-command-arg 'r=JSON.parse(STDIN.read); g=r["excerpt_ranges"]["editable_350"]; print r["cursor_excerpt"][g["start"]...g["end"]]' --model-command-input request-json -o /tmp/zed-model-command-sandbox-report.md`
 - `cargo test -p edit_prediction_cli model_adapter -- --nocapture`
 - `cargo test -p edit_prediction_cli model_command -- --nocapture`
 - `cargo test -p edit_prediction_cli model_http -- --nocapture`
@@ -70,10 +71,10 @@ Latest verified commands:
 - real local stack: `script/run-local-zeta2-llama --no-build --log-dir /tmp/zed-local-zeta2-real` downloaded/cached `bartowski/zed-industries_zeta-2-GGUF:Q4_K_M`, loaded it on Metal, and started `llama-server` on `127.0.0.1:8080`
 
 Current verification blocker:
-- Real replay through the local Q4 stack still needs an unsandboxed run. The sandboxed `target/debug/ep replay-model-command ... --model-http-url http://127.0.0.1:3297/predict` panicked in macOS `system-configuration` initialization, and the required unsandboxed rerun was rejected by the environment's usage-limit policy.
+- Real replay through the local Q4 stack still needs `llama-server` to run outside the sandbox. `replay-model-command` no longer requires a GPUI headless app and now runs in the sandbox, but sandboxed `llama-server` cannot bind its HTTP socket.
 
 Immediate next useful milestone:
-- run the real local Q4 replay outside the sandbox and commit the resulting latency/safety report.
+- start `script/run-local-zeta2-llama --offline` outside the sandbox, run the real local Q4 replay, and commit the resulting latency/safety report.
 
 Fallback if local backend integration stalls:
 - if the Q4 replay is too slow or unstable, run the same launcher with a smaller GGUF file such as `zed-industries_zeta-2-Q3_K_M.gguf` and compare reports.
