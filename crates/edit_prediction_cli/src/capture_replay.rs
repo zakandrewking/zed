@@ -6,6 +6,7 @@ use clap::Args;
 use similar::TextDiff;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use strum::IntoEnumIterator as _;
 use zeta_prompt::{
     ZetaFormat, excerpt_range_for_format, format_zeta_prompt, parse_zeta2_model_output,
 };
@@ -18,6 +19,9 @@ pub struct ReplayCapturesArgs {
     /// Zeta prompt format to replay with.
     #[arg(long)]
     pub format: Option<String>,
+    /// Replay the capture corpus against every supported Zeta prompt format.
+    #[arg(long)]
+    pub all_formats: bool,
 }
 
 #[derive(Debug)]
@@ -36,21 +40,29 @@ struct ReplayResult {
 }
 
 pub fn run_replay_captures(args: &ReplayCapturesArgs, output_path: Option<&PathBuf>) -> Result<()> {
-    let format = args
-        .format
-        .as_deref()
-        .map(ZetaFormat::parse)
-        .transpose()?
-        .unwrap_or_default();
+    let formats = replay_formats(args)?;
     let capture_directories = capture_request_directories(&args.directory)?;
-    let mut results = Vec::new();
-    for capture_directory in capture_directories {
-        let capture = load_capture_summary(&capture_directory)?;
-        let captured_prompt = read_optional_text(&capture_directory.join("prompt.txt"))?;
-        results.push(replay_capture(&capture, captured_prompt.as_deref(), format));
+    let captures = capture_directories
+        .iter()
+        .map(|capture_directory| {
+            let capture = load_capture_summary(capture_directory)?;
+            let captured_prompt = read_optional_text(&capture_directory.join("prompt.txt"))?;
+            anyhow::Ok((capture, captured_prompt))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut format_reports = Vec::new();
+    for format in formats {
+        let results = captures
+            .iter()
+            .map(|(capture, captured_prompt)| {
+                replay_capture(capture, captured_prompt.as_deref(), format)
+            })
+            .collect();
+        format_reports.push(FormatReplayReport { format, results });
     }
 
-    let output = render_replay_report(&args.directory, format, &results);
+    let output = render_replay_report(&args.directory, &format_reports);
     if let Some(output_path) = output_path {
         std::fs::write(output_path, output).with_context(|| {
             format!("failed to write replay report to {}", output_path.display())
@@ -60,6 +72,27 @@ pub fn run_replay_captures(args: &ReplayCapturesArgs, output_path: Option<&PathB
     }
 
     Ok(())
+}
+
+fn replay_formats(args: &ReplayCapturesArgs) -> Result<Vec<ZetaFormat>> {
+    if args.all_formats {
+        let formats = ZetaFormat::iter().collect::<Vec<_>>();
+        return Ok(formats);
+    }
+
+    Ok(vec![
+        args.format
+            .as_deref()
+            .map(ZetaFormat::parse)
+            .transpose()?
+            .unwrap_or_default(),
+    ])
+}
+
+#[derive(Debug)]
+struct FormatReplayReport {
+    format: ZetaFormat,
+    results: Vec<ReplayResult>,
 }
 
 fn replay_capture(
@@ -153,7 +186,52 @@ fn first_prompt_diff(captured: &str, regenerated: &str) -> Option<String> {
     None
 }
 
-fn render_replay_report(directory: &Path, format: ZetaFormat, results: &[ReplayResult]) -> String {
+fn render_replay_report(directory: &Path, format_reports: &[FormatReplayReport]) -> String {
+    let mut output = String::new();
+    _ = writeln!(output, "# Capture Replay Report");
+    _ = writeln!(output);
+    _ = writeln!(output, "Directory: `{}`", directory.display());
+    _ = writeln!(output, "Formats: `{}`", format_reports.len());
+    _ = writeln!(output);
+    _ = writeln!(output, "## Summary");
+    _ = writeln!(output);
+    _ = writeln!(
+        output,
+        "| Format | Fixtures | Prompt Exact Matches | Response Range Matches | Response Parse Successes |"
+    );
+    _ = writeln!(output, "| --- | ---: | ---: | ---: | ---: |");
+    for format_report in format_reports {
+        let summary = replay_summary(&format_report.results);
+        _ = writeln!(
+            output,
+            "| `{}` | `{}` | `{}` | `{}` | `{}` |",
+            format_report.format,
+            summary.total,
+            summary.prompt_exact_matches,
+            summary.response_range_matches,
+            summary.response_parse_ok
+        );
+    }
+
+    for format_report in format_reports {
+        render_format_report(&mut output, format_report.format, &format_report.results);
+    }
+
+    output
+}
+
+#[derive(Debug)]
+struct ReplaySummary {
+    total: usize,
+    prompt_captured: usize,
+    prompt_regenerated: usize,
+    prompt_exact_matches: usize,
+    response_present: usize,
+    response_range_matches: usize,
+    response_parse_ok: usize,
+}
+
+fn replay_summary(results: &[ReplayResult]) -> ReplaySummary {
     let total = results.len();
     let prompt_captured = results
         .iter()
@@ -180,25 +258,49 @@ fn render_replay_report(directory: &Path, format: ZetaFormat, results: &[ReplayR
         .filter(|result| result.response_parse_ok == Some(true))
         .count();
 
-    let mut output = String::new();
-    _ = writeln!(output, "# Capture Replay Report");
+    ReplaySummary {
+        total,
+        prompt_captured,
+        prompt_regenerated,
+        prompt_exact_matches,
+        response_present,
+        response_range_matches,
+        response_parse_ok,
+    }
+}
+
+fn render_format_report(output: &mut String, format: ZetaFormat, results: &[ReplayResult]) {
+    let summary = replay_summary(results);
     _ = writeln!(output);
-    _ = writeln!(output, "Directory: `{}`", directory.display());
-    _ = writeln!(output, "Format: `{}`", format);
-    _ = writeln!(output, "Fixtures: `{total}`");
-    _ = writeln!(output, "Prompts captured: `{prompt_captured}`");
-    _ = writeln!(output, "Prompts regenerated: `{prompt_regenerated}`");
-    _ = writeln!(output, "Prompt exact matches: `{prompt_exact_matches}`");
-    _ = writeln!(output, "Responses present: `{response_present}`");
+    _ = writeln!(output, "## Format `{}`", format);
+    _ = writeln!(output);
+    _ = writeln!(output, "Fixtures: `{}`", summary.total);
+    _ = writeln!(output, "Prompts captured: `{}`", summary.prompt_captured);
     _ = writeln!(
         output,
-        "Response editable-range matches current format: `{response_range_matches}`"
+        "Prompts regenerated: `{}`",
+        summary.prompt_regenerated
     );
-    _ = writeln!(output, "Response parse successes: `{response_parse_ok}`");
+    _ = writeln!(
+        output,
+        "Prompt exact matches: `{}`",
+        summary.prompt_exact_matches
+    );
+    _ = writeln!(output, "Responses present: `{}`", summary.response_present);
+    _ = writeln!(
+        output,
+        "Response editable-range matches current format: `{}`",
+        summary.response_range_matches
+    );
+    _ = writeln!(
+        output,
+        "Response parse successes: `{}`",
+        summary.response_parse_ok
+    );
     _ = writeln!(output);
 
     for result in results {
-        _ = writeln!(output, "## {}", result.name);
+        _ = writeln!(output, "### {}", result.name);
         _ = writeln!(output);
         _ = writeln!(
             output,
@@ -262,8 +364,6 @@ fn render_replay_report(directory: &Path, format: ZetaFormat, results: &[ReplayR
         );
         _ = writeln!(output);
     }
-
-    output
 }
 
 #[cfg(test)]
@@ -338,6 +438,7 @@ mod tests {
         let args = ReplayCapturesArgs {
             directory: directory.path().to_path_buf(),
             format: None,
+            all_formats: false,
         };
         let output_path = directory.path().join("report.md");
         run_replay_captures(&args, Some(&output_path)).unwrap();
@@ -346,5 +447,76 @@ mod tests {
         assert!(report.contains("Prompt exact matches: `1`"));
         assert!(report.contains("- Prompt exact match: `yes`"));
         assert!(report.contains("- Response editable-range matches current format: `yes`"));
+    }
+
+    #[test]
+    fn replays_all_formats() {
+        let directory = tempdir().unwrap();
+        let request_dir = directory.path().join("request-0001");
+        std::fs::create_dir_all(&request_dir).unwrap();
+
+        let request = PredictEditsV3Request {
+            input: ZetaPromptInput {
+                cursor_path: Arc::from(Path::new("src/main.rs")),
+                cursor_excerpt: Arc::from("fn main() {}\n"),
+                cursor_offset_in_excerpt: 3,
+                excerpt_start_row: Some(0),
+                events: Vec::new(),
+                related_files: Some(Vec::new()),
+                active_buffer_diagnostics: Vec::new(),
+                excerpt_ranges: ExcerptRanges {
+                    editable_150: Range { start: 0, end: 13 },
+                    editable_180: Range { start: 0, end: 13 },
+                    editable_350: Range { start: 0, end: 13 },
+                    editable_512: Some(Range { start: 0, end: 13 }),
+                    editable_150_context_350: Range { start: 0, end: 13 },
+                    editable_180_context_350: Range { start: 0, end: 13 },
+                    editable_350_context_150: Range { start: 0, end: 13 },
+                    editable_350_context_512: Some(Range { start: 0, end: 13 }),
+                    editable_350_context_1024: Some(Range { start: 0, end: 13 }),
+                    context_4096: Some(Range { start: 0, end: 13 }),
+                    context_8192: Some(Range { start: 0, end: 13 }),
+                },
+                syntax_ranges: None,
+                in_open_source_repo: true,
+                can_collect_data: false,
+                repo_url: None,
+            },
+            trigger: Default::default(),
+        };
+        let response = PredictEditsV3Response {
+            request_id: "stub-request-1".to_string(),
+            output: String::new(),
+            editable_range: excerpt_range_for_format(
+                ZetaFormat::default(),
+                &request.input.excerpt_ranges,
+            )
+            .1,
+            model_version: Some("local-stub".to_string()),
+        };
+
+        std::fs::write(
+            request_dir.join("request.json"),
+            serde_json::to_string_pretty(&request).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            request_dir.join("response.json"),
+            serde_json::to_string_pretty(&response).unwrap(),
+        )
+        .unwrap();
+
+        let args = ReplayCapturesArgs {
+            directory: directory.path().to_path_buf(),
+            format: None,
+            all_formats: true,
+        };
+        let output_path = directory.path().join("report.md");
+        run_replay_captures(&args, Some(&output_path)).unwrap();
+
+        let report = std::fs::read_to_string(output_path).unwrap();
+        assert!(report.contains("Formats: `"));
+        assert!(report.contains("| `V0131GitMergeMarkersPrefix` |"));
+        assert!(report.contains("## Format `V0131GitMergeMarkersPrefix`"));
     }
 }
